@@ -19,6 +19,7 @@ from sqlalchemy import (
     inspect,
     select,
     text,
+    update,
 )
 from sqlalchemy.dialects.postgresql import TIMESTAMP as PG_TIMESTAMP
 from sqlalchemy.orm import (
@@ -81,6 +82,8 @@ class Conversation(Base):
     )
     # 会话名称：首轮问答时取用户第一个问题，之后可由用户改名
     title: Mapped[str | None] = mapped_column(String(TITLE_MAX_LEN), nullable=True)
+    # 软删除标记：为空表示未删除；置为删除时间后对所有读接口不可见
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTimeSec, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
 
 
@@ -106,6 +109,7 @@ def init_db() -> None:
     _migrate_messages_table()
     # 需排在 messages 迁移之后：回填会话名依赖 question 列
     _migrate_conversations_title()
+    _migrate_conversations_deleted_at()
     _migrate_timestamp_columns()
 
 
@@ -149,6 +153,16 @@ def _migrate_conversations_title() -> None:
                 ),
                 {"max_len": TITLE_MAX_LEN},
             )
+
+
+def _migrate_conversations_deleted_at() -> None:
+    """新增 conversations.deleted_at 列（软删除标记）：存量会话取 NULL，即视为未删除。"""
+    insp = inspect(engine)
+    columns = {c["name"] for c in insp.get_columns("conversations")}
+    if "deleted_at" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE conversations ADD COLUMN deleted_at TIMESTAMP(0)"))
 
 
 def _migrate_messages_table() -> None:
@@ -244,9 +258,89 @@ def create_user(username: str, password_hash: str, is_admin: bool = False) -> Us
         return user
 
 
-def get_conversation(conversation_id: str) -> Conversation | None:
+def list_users() -> list[dict[str, Any]]:
+    """后台用户管理用：全部用户（含管理员），按 id 正序。"""
     with SessionLocal() as session:
-        return session.get(Conversation, conversation_id)
+        users = session.execute(select(User).order_by(User.id)).scalars().all()
+        return [
+            {
+                "id": user.id,
+                "username": user.username,
+                "is_admin": user.is_admin,
+                "created_at": user.created_at,
+            }
+            for user in users
+        ]
+
+
+def get_user_by_id(user_id: int) -> User | None:
+    with SessionLocal() as session:
+        return session.get(User, user_id)
+
+
+def is_username_taken(username: str, exclude_id: int | None = None) -> bool:
+    """用户名是否已被占用；改名时通过 exclude_id 排除自己。"""
+    with SessionLocal() as session:
+        stmt = select(User.id).where(User.username == username)
+        if exclude_id is not None:
+            stmt = stmt.where(User.id != exclude_id)
+        return session.scalar(stmt) is not None
+
+
+def count_admins() -> int:
+    """管理员数量：用于兜住「至少保留一个管理员」的护栏。"""
+    with SessionLocal() as session:
+        return session.scalar(select(func.count(User.id)).where(User.is_admin.is_(True))) or 0
+
+
+def update_user(
+    user_id: int,
+    *,
+    username: str | None = None,
+    password_hash: str | None = None,
+    is_admin: bool | None = None,
+) -> None:
+    """按需更新用户名 / 密码 / 管理员标识，值为 None 表示不改这一项。"""
+    with SessionLocal() as session:
+        user = session.get(User, user_id)
+        if user is None:
+            return
+        if username is not None:
+            user.username = username
+        if password_hash is not None:
+            user.password_hash = password_hash
+        if is_admin is not None:
+            user.is_admin = is_admin
+        session.commit()
+
+
+def delete_user(user_id: int) -> bool:
+    """删除用户，同时软删除其名下未删除的会话。
+
+    会话外键是 ON DELETE SET NULL，若不先打删除标记，被删用户的会话会变成
+    无主会话，后续聊天时可能被 claim_conversation 归属给其他用户。
+    """
+    with SessionLocal() as session:
+        user = session.get(User, user_id)
+        if user is None:
+            return False
+        session.execute(
+            update(Conversation)
+            .where(Conversation.user_id == user_id, Conversation.deleted_at.is_(None))
+            .values(deleted_at=_now())
+        )
+        session.delete(user)
+        session.commit()
+        return True
+
+
+def get_conversation(conversation_id: str) -> Conversation | None:
+    """取会话；已软删除的一律视为不存在，调用方无需再判断删除态。"""
+    with SessionLocal() as session:
+        conv = session.get(Conversation, conversation_id)
+        if conv is None or conv.deleted_at is not None:
+            return None
+        return conv
 
 
 def claim_conversation(conversation_id: str, user_id: int) -> None:
@@ -274,6 +368,7 @@ def save_chat_round(
     """落库一轮问答（单行 question/answer）：会话不存在则先创建。
 
     会话名称只在首个问题写入；用户改过名（title 非空）则保持不变。
+    命中已软删除的会话时撤销删除标记（复活该会话并继续累积问答）。
     """
     with SessionLocal() as session:
         conv = session.get(Conversation, conversation_id)
@@ -285,8 +380,11 @@ def save_chat_round(
                     title=_title_from_question(question),
                 )
             )
-        elif conv.title is None:
-            conv.title = _title_from_question(question)
+        else:
+            if conv.deleted_at is not None:
+                conv.deleted_at = None
+            if conv.title is None:
+                conv.title = _title_from_question(question)
         session.add(
             Message(
                 conversation_id=conversation_id,
@@ -308,12 +406,33 @@ def rename_conversation(conversation_id: str, title: str) -> None:
         session.commit()
 
 
+def delete_conversation(conversation_id: str) -> bool:
+    """软删除会话：只把 deleted_at 置为当前时间，会话与其消息都留在库内。
+
+    返回是否完成一次删除；会话不存在或已是删除态时返回 False。
+    """
+    with SessionLocal() as session:
+        conv = session.get(Conversation, conversation_id)
+        if conv is None or conv.deleted_at is not None:
+            return False
+        conv.deleted_at = _now()
+        session.commit()
+        return True
+
+
 def load_conversation_messages(conversation_id: str) -> list[dict[str, str]]:
-    """按时间顺序取会话内的问答，展开为 role/content 序列（供补历史时使用）。"""
+    """按时间顺序取会话内的问答，展开为 role/content 序列（供补历史时使用）。
+
+    会话已软删除时不产出任何消息。
+    """
     with SessionLocal() as session:
         rows = session.scalars(
             select(Message)
-            .where(Message.conversation_id == conversation_id)
+            .join(Conversation, Conversation.id == Message.conversation_id)
+            .where(
+                Message.conversation_id == conversation_id,
+                Conversation.deleted_at.is_(None),
+            )
             .order_by(Message.id)
         ).all()
     result: list[dict[str, str]] = []
@@ -325,31 +444,31 @@ def load_conversation_messages(conversation_id: str) -> list[dict[str, str]]:
 
 
 def list_user_conversations(user_id: int) -> list[dict[str, Any]]:
-    """当前用户的会话摘要：名称取 conversations.title，按最近一次问答时间倒序。"""
+    """当前用户的会话摘要（只含未删除的）：名称取 conversations.title，按最近一次问答时间倒序。"""
     with SessionLocal() as session:
         convs = session.scalars(
-            select(Conversation).where(Conversation.user_id == user_id)
+            select(Conversation).where(
+                Conversation.user_id == user_id,
+                Conversation.deleted_at.is_(None),
+            )
         ).all()
         if not convs:
             return []
         stats = session.execute(
             select(
                 Message.conversation_id,
-                func.count().label("rounds"),
                 func.max(Message.created_at).label("last_at"),
             )
             .where(Message.conversation_id.in_([c.id for c in convs]))
             .group_by(Message.conversation_id)
         ).all()
 
-    rounds = {cid: count for cid, count, _ in stats}
-    updated = {cid: last_at for cid, _, last_at in stats}
+    updated = {cid: last_at for cid, last_at in stats}
 
     items = [
         {
             "id": conv.id,
             "title": conv.title or "新会话",
-            "rounds": rounds.get(conv.id, 0),
             "updated_at": updated.get(conv.id, conv.created_at),
         }
         for conv in convs

@@ -48,7 +48,6 @@ class ConversationSummary(BaseModel):
 
     id: str
     title: str
-    rounds: int
     updated_at: datetime
 
 
@@ -63,6 +62,13 @@ class RenamedConversation(BaseModel):
 
     id: str
     title: str
+
+
+class DeletedConversation(BaseModel):
+    """删除结果，供前端从列表中移除对应项。"""
+
+    id: str
+    deleted: bool
 
 
 class ChatRequest(BaseModel):
@@ -205,6 +211,18 @@ def rename_conversation(
     return RenamedConversation(id=conversation_id, title=title)
 
 
+@app.delete("/api/conversations/{conversation_id}", response_model=DeletedConversation)
+def delete_conversation(
+    conversation_id: str, user: User = Depends(auth.get_current_user)
+) -> DeletedConversation:
+    """软删除会话（只置 `deleted_at`，记录与消息保留在库内）：仅限本人会话，管理员可删任意会话。"""
+    # 归属校验：会话不存在或已是删除态时放行，由下面的删除结果返回 404
+    _check_conversation_access(conversation_id, user)
+    if not db.delete_conversation(conversation_id):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return DeletedConversation(id=conversation_id, deleted=True)
+
+
 @app.get("/api/conversations/{conversation_id}/messages")
 def conversation_messages(
     conversation_id: str, user: User = Depends(auth.get_current_user)
@@ -253,3 +271,104 @@ def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ---------- 后台：用户管理（仅管理员） ----------
+
+
+USERNAME_PATTERN = r"^[\w\u4e00-\u9fa5-]+$"
+
+
+class AdminUser(BaseModel):
+    """后台用户列表的一项。"""
+
+    id: int
+    username: str
+    is_admin: bool
+    created_at: datetime
+
+
+class AdminUserCreate(BaseModel):
+    username: str = Field(min_length=2, max_length=32, pattern=USERNAME_PATTERN)
+    password: str = Field(min_length=4, max_length=64)
+    is_admin: bool = False
+
+
+class AdminUserUpdate(BaseModel):
+    """按需提交要改的字段：不传的字段保持原值。"""
+
+    username: str | None = Field(
+        default=None, min_length=2, max_length=32, pattern=USERNAME_PATTERN
+    )
+    password: str | None = Field(default=None, min_length=4, max_length=64)
+    is_admin: bool | None = None
+
+
+class DeletedUser(BaseModel):
+    id: int
+    deleted: bool
+
+
+def _user_row(user: User) -> AdminUser:
+    return AdminUser(
+        id=user.id, username=user.username, is_admin=user.is_admin, created_at=user.created_at
+    )
+
+
+@app.get("/api/admin/users", response_model=list[AdminUser])
+def admin_list_users(_: User = Depends(auth.require_admin)) -> list[AdminUser]:
+    """系统所有用户（含管理员），按 id 正序。"""
+    return [AdminUser(**item) for item in db.list_users()]
+
+
+@app.post("/api/admin/users", response_model=AdminUser, status_code=201)
+def admin_create_user(req: AdminUserCreate, _: User = Depends(auth.require_admin)) -> AdminUser:
+    """新建用户，可直接指定管理员身份（无需自动登录）。"""
+    if db.is_username_taken(req.username):
+        raise HTTPException(status_code=409, detail="用户名已存在")
+    user = db.create_user(req.username, auth.hash_password(req.password), is_admin=req.is_admin)
+    return _user_row(user)
+
+
+@app.patch("/api/admin/users/{user_id}", response_model=AdminUser)
+def admin_update_user(
+    user_id: int, req: AdminUserUpdate, _: User = Depends(auth.require_admin)
+) -> AdminUser:
+    """修改用户名 / 重置密码 / 切换管理员身份。"""
+    target = db.get_user_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if req.username is None and req.password is None and req.is_admin is None:
+        raise HTTPException(status_code=422, detail="没有需要修改的字段")
+    if req.username is not None and req.username != target.username:
+        if db.is_username_taken(req.username, exclude_id=user_id):
+            raise HTTPException(status_code=409, detail="用户名已存在")
+    if req.is_admin is False and target.is_admin and db.count_admins() <= 1:
+        raise HTTPException(status_code=409, detail="系统至少需要保留一个管理员")
+    db.update_user(
+        user_id,
+        username=req.username,
+        password_hash=auth.hash_password(req.password) if req.password else None,
+        is_admin=req.is_admin,
+    )
+    updated = db.get_user_by_id(user_id)
+    if updated is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return _user_row(updated)
+
+
+@app.delete("/api/admin/users/{user_id}", response_model=DeletedUser)
+def admin_delete_user(
+    user_id: int, operator: User = Depends(auth.require_admin)
+) -> DeletedUser:
+    """删除用户（其会话一并软删除，数据保留在库内）。"""
+    target = db.get_user_by_id(user_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    if user_id == operator.id:
+        raise HTTPException(status_code=409, detail="不能删除当前登录的账号")
+    if target.is_admin and db.count_admins() <= 1:
+        raise HTTPException(status_code=409, detail="系统至少需要保留一个管理员")
+    if not db.delete_user(user_id):
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return DeletedUser(id=user_id, deleted=True)

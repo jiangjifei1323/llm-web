@@ -2,8 +2,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { clearAuth, getUsername } from '@/api/auth'
+import { clearAuth, fetchMe, getUsername, isAdmin } from '@/api/auth'
 import {
+  deleteConversation,
   fetchConversationMessages,
   fetchConversations,
   renameConversation,
@@ -14,6 +15,7 @@ import {
 
 const router = useRouter()
 const username = ref(getUsername() ?? '')
+const adminUser = ref(isAdmin())
 const avatarText = computed(() =>
   username.value ? username.value.slice(0, 1).toUpperCase() : '?',
 )
@@ -50,6 +52,12 @@ function logout() {
   clearAuth()
   sessionStorage.removeItem(CONVERSATION_KEY)
   void router.replace({ name: 'login' })
+}
+
+/** 进入后台管理页（入口只对管理员展示，路由守卫还会再校验一次权限）。 */
+function goAdmin() {
+  userMenuOpen.value = false
+  void router.push({ name: 'admin' })
 }
 
 async function scrollToBottom() {
@@ -128,6 +136,44 @@ async function saveRename() {
   }
 }
 
+// ---------- 会话删除 ----------
+const deletingId = ref('')
+const pendingDelete = ref<ConversationSummary | null>(null)
+const deleteDialogRef = ref<HTMLElement | null>(null)
+
+/** 打开应用内的确认弹框（替代样式不可控的原生 confirm）。 */
+function askDelete(conv: ConversationSummary) {
+  if (loading.value || historyLoading.value || deletingId.value) return
+  errorMsg.value = ''
+  pendingDelete.value = conv
+  void nextTick(() => deleteDialogRef.value?.focus())
+}
+
+function cancelDelete() {
+  if (deletingId.value) return
+  pendingDelete.value = null
+}
+
+/** 确认后执行软删除：本地从列表移除，删的是当前打开的会话时重置为新会话。 */
+async function confirmDelete() {
+  const conv = pendingDelete.value
+  if (!conv || deletingId.value) return
+
+  deletingId.value = conv.id
+  errorMsg.value = ''
+  try {
+    await deleteConversation(conv.id)
+    conversations.value = conversations.value.filter((item) => item.id !== conv.id)
+    if (conversationId.value === conv.id) resetConversation()
+    pendingDelete.value = null
+  } catch (err) {
+    errorMsg.value = `删除失败：${errText(err)}`
+    pendingDelete.value = null
+  } finally {
+    deletingId.value = ''
+  }
+}
+
 function formatTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
@@ -144,6 +190,14 @@ function onDocumentClick(e: MouseEvent) {
 
 onMounted(async () => {
   document.addEventListener('click', onDocumentClick)
+  // 向后端确认真实身份与管理员标识，纠正登录态里可能过期的本地标记
+  try {
+    const me = await fetchMe()
+    username.value = me.username
+    adminUser.value = me.is_admin
+  } catch {
+    /* 令牌失效时 fetchMe 已跳转登录页，这里不阻断会话列表加载 */
+  }
   await loadConversations()
   // 刷新前正在进行的会话，重新拉取历史以还原界面
   if (conversationId.value) await loadHistory(conversationId.value)
@@ -213,6 +267,7 @@ function onKeydown(e: KeyboardEvent) {
   <div class="chat-layout">
     <aside class="sidebar">
       <h2 class="sidebar-title">会话列表</h2>
+      <button class="reset-btn" :disabled="loading" @click="resetConversation">新建会话</button>
 
       <p v-if="conversations.length === 0" class="conv-empty">暂无历史会话</p>
       <ul v-else class="conv-list">
@@ -247,9 +302,7 @@ function onKeydown(e: KeyboardEvent) {
               @click="openConversation(conv.id)"
             >
               <span class="conv-title">{{ conv.title }}</span>
-              <span class="conv-meta">
-                {{ conv.rounds }} 轮 · {{ formatTime(conv.updated_at) }}
-              </span>
+              <span class="conv-meta">{{ formatTime(conv.updated_at) }}</span>
             </button>
             <button
               class="rename-btn"
@@ -259,6 +312,15 @@ function onKeydown(e: KeyboardEvent) {
               @click="startRename(conv)"
             >
               ✎
+            </button>
+            <button
+              class="delete-btn"
+              title="删除"
+              aria-label="删除会话"
+              :disabled="loading || historyLoading || deletingId !== ''"
+              @click="askDelete(conv)"
+            >
+              {{ deletingId === conv.id ? '…' : '✕' }}
             </button>
           </template>
         </li>
@@ -272,6 +334,7 @@ function onKeydown(e: KeyboardEvent) {
 
         <div v-if="userMenuOpen" class="user-popover">
           <p class="pop-username">{{ username }}</p>
+          <button v-if="adminUser" class="admin-btn" @click="goAdmin">后台管理</button>
           <button class="logout-btn" :disabled="loading" @click="logout">退出登录</button>
         </div>
       </div>
@@ -281,9 +344,6 @@ function onKeydown(e: KeyboardEvent) {
       <header class="chat-header">
         <h1>问答助手</h1>
         <p class="subtitle">基于 Vue + FastAPI 的基础问答</p>
-        <div class="header-actions">
-          <button class="reset-btn" :disabled="loading" @click="resetConversation">新建会话</button>
-        </div>
       </header>
 
       <div ref="listRef" class="message-list">
@@ -316,6 +376,32 @@ function onKeydown(e: KeyboardEvent) {
         </button>
       </footer>
     </div>
+
+    <Teleport to="body">
+      <div
+        v-if="pendingDelete"
+        ref="deleteDialogRef"
+        class="dialog-mask"
+        tabindex="-1"
+        @click.self="cancelDelete"
+        @keydown.esc.prevent="cancelDelete"
+      >
+        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
+          <h3 id="delete-dialog-title" class="dialog-title">删除会话</h3>
+          <p class="dialog-text">
+            确定删除「{{ pendingDelete.title }}」？删除后该会话从列表隐藏，历史消息仍保留在库内。
+          </p>
+          <div class="dialog-actions">
+            <button class="dialog-btn ghost" :disabled="deletingId !== ''" @click="cancelDelete">
+              取消
+            </button>
+            <button class="dialog-btn danger" :disabled="deletingId !== ''" @click="confirmDelete">
+              {{ deletingId === pendingDelete.id ? '删除中…' : '删除' }}
+            </button>
+          </div>
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -338,9 +424,32 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 .sidebar-title {
-  margin: 0 0 10px;
+  margin: 0 0 8px;
   font-size: 14px;
   color: #666;
+}
+
+/* 新建会话：置于会话列表上方 */
+.reset-btn {
+  margin: 0 0 10px;
+  padding: 6px 12px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fff;
+  color: #555;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.reset-btn:hover:not(:disabled),
+.reset-btn:focus-visible {
+  border-color: #1a7f37;
+  color: #1a7f37;
+}
+
+.reset-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .conv-empty {
@@ -365,7 +474,7 @@ function onKeydown(e: KeyboardEvent) {
   gap: 3px;
   width: 100%;
   margin-bottom: 4px;
-  padding: 8px 30px 8px 10px;
+  padding: 8px 52px 8px 10px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -400,7 +509,7 @@ function onKeydown(e: KeyboardEvent) {
   font-size: 12px;
 }
 
-/* 会话行：为右上的重命名按钮定位 */
+/* 会话行：为右上的重命名 / 删除按钮定位 */
 .conv-row {
   position: relative;
 }
@@ -408,7 +517,7 @@ function onKeydown(e: KeyboardEvent) {
 .rename-btn {
   position: absolute;
   top: 7px;
-  right: 6px;
+  right: 30px;
   width: 22px;
   height: 22px;
   padding: 0;
@@ -430,6 +539,35 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 .rename-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.2;
+}
+
+.delete-btn {
+  position: absolute;
+  top: 7px;
+  right: 6px;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: #777;
+  font-size: 13px;
+  line-height: 1;
+  opacity: 0.45;
+  cursor: pointer;
+}
+
+.delete-btn:hover:not(:disabled),
+.delete-btn:focus-visible {
+  background: #fdecec;
+  color: #d33;
+  opacity: 1;
+}
+
+.delete-btn:disabled {
   cursor: not-allowed;
   opacity: 0.2;
 }
@@ -518,29 +656,6 @@ function onKeydown(e: KeyboardEvent) {
   margin: 4px 0 0;
   color: #888;
   font-size: 13px;
-}
-
-.header-actions {
-  margin-top: 6px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-}
-
-.reset-btn {
-  padding: 4px 12px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  background: #fff;
-  color: #555;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.reset-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .message-list {
@@ -677,6 +792,22 @@ function onKeydown(e: KeyboardEvent) {
   font-weight: 600;
 }
 
+.admin-btn {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 7px 0;
+  border: 1px solid #bfe0c8;
+  border-radius: 6px;
+  background: #fff;
+  color: #1a7f37;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.admin-btn:hover {
+  background: #e3f2e6;
+}
+
 .logout-btn {
   width: 100%;
   padding: 7px 0;
@@ -725,6 +856,85 @@ function onKeydown(e: KeyboardEvent) {
 
 .send-btn:disabled {
   background: #b5cdbd;
+  cursor: not-allowed;
+}
+
+/* ---------- 会话删除确认弹框 ---------- */
+.dialog-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(20, 22, 26, 0.4);
+  outline: none;
+}
+
+.dialog {
+  width: 100%;
+  max-width: 360px;
+  padding: 18px 20px 16px;
+  border-radius: 12px;
+  background: #fff;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.2);
+  box-sizing: border-box;
+}
+
+.dialog-title {
+  margin: 0 0 6px;
+  color: #333;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.dialog-text {
+  margin: 0 0 18px;
+  color: #666;
+  font-size: 13px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dialog-btn {
+  min-width: 72px;
+  padding: 7px 16px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.dialog-btn.ghost {
+  border: 1px solid #d0d0d0;
+  background: #fff;
+  color: #555;
+}
+
+.dialog-btn.ghost:hover:not(:disabled) {
+  border-color: #999;
+  color: #333;
+}
+
+.dialog-btn.danger {
+  border: 1px solid #d33;
+  background: #d33;
+  color: #fff;
+}
+
+.dialog-btn.danger:hover:not(:disabled) {
+  border-color: #b92b2b;
+  background: #b92b2b;
+}
+
+.dialog-btn:disabled {
+  opacity: 0.6;
   cursor: not-allowed;
 }
 </style>

@@ -56,6 +56,13 @@ def get_current_user(
     return user
 
 
+def require_admin(user: db.User = Depends(get_current_user)) -> db.User:
+    """后台接口专用依赖：非管理员一律 403。"""
+    if not user.is_admin:
+        raise HTTPException(status_code=403, detail="需要管理员权限")
+    return user
+
+
 def seed_admin(username: str = "admin", password: str = "admin") -> None:
     """启动时确保管理员账户存在（已存在则不覆盖，保留改过的密码）。"""
     if db.get_user_by_username(username) is None:
