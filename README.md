@@ -66,7 +66,7 @@ LLM_TEMPERATURE=0.7
 ```sh
 cd backend
 uv sync                                            # 首次或依赖变更后执行
-.\.venv\Scripts\python.exe -m uvicorn app.main:app --reload --port 8000
+.\.venv\Scripts\python.exe -m uvicorn app.main:app --port 8000
 ```
 
 接口文档：<http://127.0.0.1:8000/docs>
