@@ -1,0 +1,14 @@
+[project]
+name = "llm-web-backend"
+version = "0.1.0"
+description = "问答助手后端（FastAPI）"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-dotenv>=1.0",
+]
+
+[tool.uv]
+# 虚拟项目：只管理依赖，不构建/安装项目自身
+package = false

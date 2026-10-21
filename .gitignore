@@ -14,15 +14,25 @@ dist-ssr
 coverage
 *.local
 
+# Environment files（含密钥，禁止提交；仅放行模板）
+.env
+.env.*
+!.env.example
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
 .idea
+.trae/
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
+
+# Windows
+Thumbs.db
+desktop.ini
 
 *.tsbuildinfo
 
