@@ -14,6 +14,7 @@ def init_db() -> None:
     # 需排在 messages 迁移之后：回填会话名依赖 question 列
     _migrate_conversations_title()
     _migrate_conversations_deleted_at()
+    _migrate_users_deleted_at()
     _migrate_timestamp_columns()
 
 
@@ -67,6 +68,16 @@ def _migrate_conversations_deleted_at() -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE conversations ADD COLUMN deleted_at TIMESTAMP(0)"))
+
+
+def _migrate_users_deleted_at() -> None:
+    """新增 users.deleted_at 列（软删除标记）：存量用户取 NULL，即视为未删除。"""
+    insp = inspect(engine)
+    columns = {c["name"] for c in insp.get_columns("users")}
+    if "deleted_at" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE users ADD COLUMN deleted_at TIMESTAMP(0)"))
 
 
 def _migrate_messages_table() -> None:

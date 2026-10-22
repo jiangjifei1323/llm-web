@@ -18,7 +18,9 @@ def _token_response(user: User) -> TokenResponse:
 @router.post("/register", response_model=TokenResponse)
 def register(req: RegisterRequest) -> TokenResponse:
     """注册普通用户，成功后直接返回令牌（自动登录）。"""
-    if db.get_user_by_username(req.username) is not None:
+    # 按全表查重：软删除的用户名仍被占用，若只看活跃用户会漏判，
+    # 直接 create 会撞 username 唯一约束。
+    if db.is_username_taken(req.username):
         raise HTTPException(status_code=409, detail="用户名已存在")
     user = db.create_user(req.username, auth.hash_password(req.password))
     return _token_response(user)

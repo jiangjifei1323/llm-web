@@ -64,6 +64,12 @@ def require_admin(user: db.User = Depends(get_current_user)) -> db.User:
 
 
 def seed_admin(username: str = "admin", password: str = "admin") -> None:
-    """启动时确保管理员账户存在（已存在则不覆盖，保留改过的密码）。"""
-    if db.get_user_by_username(username) is None:
+    """启动时确保管理员账户存在（已存在则不覆盖，保留改过的密码）。
+
+    活跃账号已存在直接返回；若同名账号被软删除过则复活它（沿用原密码哈希），
+    否则直接 create 会撞 username 唯一约束导致启动崩溃。
+    """
+    if db.get_user_by_username(username) is not None:
+        return
+    if db.reactivate_user_by_username(username) is None:
         db.create_user(username, hash_password(password), is_admin=True)

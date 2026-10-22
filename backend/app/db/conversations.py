@@ -1,12 +1,13 @@
 """会话与问答消息的数据访问。"""
 
+import json
 from typing import Any
 from uuid import uuid4
 
 from sqlalchemy import func, select
 
 from .base import SessionLocal, _now
-from .models import Conversation, Message, TITLE_MAX_LEN
+from .models import Conversation, LLMCall, Message, TITLE_MAX_LEN
 
 
 def get_conversation(conversation_id: str) -> Conversation | None:
@@ -66,6 +67,40 @@ def save_chat_round(
                 question=question,
                 answer=answer,
                 model=model,
+            )
+        )
+        session.commit()
+
+
+def log_llm_call(
+    conversation_id: str | None,
+    user_id: int | None,
+    model: str,
+    messages: list[dict[str, str]],
+    answer: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    total_tokens: int,
+    latency_ms: int | None = None,
+    success: bool = True,
+) -> None:
+    """记录一次模型调用的输入(messages)、输出与 token 用量。
+
+    调用失败时也写入一行（answer=None、success=False），便于排查与统计。
+    """
+    with SessionLocal() as session:
+        session.add(
+            LLMCall(
+                conversation_id=conversation_id,
+                user_id=user_id,
+                model=model,
+                input=json.dumps(messages, ensure_ascii=False),
+                output=answer,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
+                latency_ms=latency_ms,
+                success=success,
             )
         )
         session.commit()
