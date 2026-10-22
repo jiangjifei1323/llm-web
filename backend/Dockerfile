@@ -18,6 +18,9 @@ RUN uv sync --frozen --no-cache
 # 再复制应用代码
 COPY app ./app
 
+# 打包后端运行所需环境变量文件（落到 /app/.env，与 main.py/base.py 读取路径一致）
+COPY .env ./.env
+
 # 非 root 运行
 RUN useradd --create-home --uid 10001 appuser \
     && chown -R appuser:appuser /app

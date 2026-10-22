@@ -1,37 +1,19 @@
-# 问答助手全栈编排：PostgreSQL + FastAPI 后端 + Nginx 前端
+# 问答助手全栈编排：FastAPI 后端 + Nginx 前端
+# 复用已存在的 PostgreSQL 容器：把后端与 postgres 放进同一个自定义网络 llmnet，
+# 后端直接用容器名 postgres:5432 连接（跨容器走内部端口，不绕宿主机）。
+# 前置步骤（只需一次）：
+#   docker network create llmnet
+#   docker network connect llmnet postgres
 # 用法：docker compose up -d --build  然后访问 http://localhost:8080
 services:
-  db:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: "123456"
-      POSTGRES_DB: llm_db
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-    # 不向宿主机发布端口：后端经 Docker 内部网络访问 db，
-    # 也避免与本机已运行的 PostgreSQL(5432) 冲突。
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d llm_db"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
-
   backend:
     build: ./backend
+    # 其余环境变量（LLM_* / JWT_*）以镜像内 backend/.env 为准（已 COPY 进 /app/.env）；
+    # DATABASE_URL 与此处网络相关，由 compose 覆盖为容器名寻址。
     environment:
-      # 主机名用服务名 db，而非 127.0.0.1
-      DATABASE_URL: postgresql+psycopg://postgres:123456@db:5432/llm_db
-      JWT_SECRET: change-me-in-production
-      JWT_EXPIRE_HOURS: "24"
-      # 未配置 LLM_API_KEY 时后端返回 mock 回答；填入真实 Key 即接入大模型
-      LLM_API_KEY: ""
-      LLM_BASE_URL: https://api.deepseek.com/v1
-      LLM_MODEL: deepseek-chat
-      LLM_TEMPERATURE: "0.7"
-    depends_on:
-      db:
-        condition: service_healthy
+      DATABASE_URL: postgresql+psycopg://postgres:123456@postgres:5432/llm_db
+    networks:
+      - llmnet
     ports:
       - "8000:8000"
 
@@ -39,8 +21,11 @@ services:
     build: ./frontend
     depends_on:
       - backend
+    networks:
+      - llmnet
     ports:
       - "8080:80"
 
-volumes:
-  pgdata:
+networks:
+  llmnet:
+    external: true
