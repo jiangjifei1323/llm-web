@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { clearAuth, fetchMe, getUsername, isAdmin } from '@/api/auth'
@@ -25,8 +25,8 @@ const input = ref('')
 const loading = ref(false)
 const errorMsg = ref('')
 const listRef = ref<HTMLElement | null>(null)
+// 用户入口弹框显隐，交由 el-popover 的 v-model:visible 管理
 const userMenuOpen = ref(false)
-const userAreaRef = ref<HTMLElement | null>(null)
 
 // 左侧会话列表
 const conversations = ref<ConversationSummary[]>([])
@@ -139,14 +139,12 @@ async function saveRename() {
 // ---------- 会话删除 ----------
 const deletingId = ref('')
 const pendingDelete = ref<ConversationSummary | null>(null)
-const deleteDialogRef = ref<HTMLElement | null>(null)
 
-/** 打开应用内的确认弹框（替代样式不可控的原生 confirm）。 */
+/** 打开 el-dialog 确认弹框（替代样式不可控的原生 confirm）。 */
 function askDelete(conv: ConversationSummary) {
   if (loading.value || historyLoading.value || deletingId.value) return
   errorMsg.value = ''
   pendingDelete.value = conv
-  void nextTick(() => deleteDialogRef.value?.focus())
 }
 
 function cancelDelete() {
@@ -181,15 +179,7 @@ function formatTime(iso: string): string {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-// 点击用户入口外部区域时收起弹框
-function onDocumentClick(e: MouseEvent) {
-  if (!userMenuOpen.value) return
-  if (userAreaRef.value?.contains(e.target as Node)) return
-  userMenuOpen.value = false
-}
-
 onMounted(async () => {
-  document.addEventListener('click', onDocumentClick)
   // 向后端确认真实身份与管理员标识，纠正登录态里可能过期的本地标记
   try {
     const me = await fetchMe()
@@ -201,10 +191,6 @@ onMounted(async () => {
   await loadConversations()
   // 刷新前正在进行的会话，重新拉取历史以还原界面
   if (conversationId.value) await loadHistory(conversationId.value)
-})
-
-onUnmounted(() => {
-  document.removeEventListener('click', onDocumentClick)
 })
 
 async function submit() {
@@ -267,7 +253,9 @@ function onKeydown(e: KeyboardEvent) {
   <div class="chat-layout">
     <aside class="sidebar">
       <h2 class="sidebar-title">会话列表</h2>
-      <button class="reset-btn" :disabled="loading" @click="resetConversation">新建会话</button>
+      <el-button class="reset-btn" :disabled="loading" @click="resetConversation">
+        新建会话
+      </el-button>
 
       <p v-if="conversations.length === 0" class="conv-empty">暂无历史会话</p>
       <ul v-else class="conv-list">
@@ -286,12 +274,17 @@ function onKeydown(e: KeyboardEvent) {
               @keydown.esc="cancelRename"
             />
             <div class="edit-actions">
-              <button type="submit" class="edit-save" :disabled="renameSaving || !editingTitle.trim()">
+              <el-button
+                type="primary"
+                size="small"
+                :disabled="renameSaving || !editingTitle.trim()"
+                @click="saveRename"
+              >
                 保存
-              </button>
-              <button type="button" class="edit-cancel" :disabled="renameSaving" @click="cancelRename">
+              </el-button>
+              <el-button size="small" :disabled="renameSaving" @click="cancelRename">
                 取消
-              </button>
+              </el-button>
             </div>
           </form>
           <template v-else>
@@ -326,17 +319,35 @@ function onKeydown(e: KeyboardEvent) {
         </li>
       </ul>
 
-      <div ref="userAreaRef" class="user-area">
-        <button class="user-chip" :aria-expanded="userMenuOpen" @click="userMenuOpen = !userMenuOpen">
-          <span class="avatar">{{ avatarText }}</span>
-          <span class="chip-name">{{ username }}</span>
-        </button>
-
-        <div v-if="userMenuOpen" class="user-popover">
-          <p class="pop-username">{{ username }}</p>
-          <button v-if="adminUser" class="admin-btn" @click="goAdmin">后台管理</button>
-          <button class="logout-btn" :disabled="loading" @click="logout">退出登录</button>
-        </div>
+      <div class="user-area">
+        <el-popover
+          v-model:visible="userMenuOpen"
+          placement="top-start"
+          :width="180"
+          trigger="click"
+        >
+          <template #reference>
+            <button class="user-chip">
+              <span class="avatar">{{ avatarText }}</span>
+              <span class="chip-name">{{ username }}</span>
+            </button>
+          </template>
+          <div class="pop-body">
+            <p class="pop-username">{{ username }}</p>
+            <el-button v-if="adminUser" type="primary" plain class="pop-btn" @click="goAdmin">
+              后台管理
+            </el-button>
+            <el-button
+              type="danger"
+              plain
+              class="pop-btn"
+              :disabled="loading"
+              @click="logout"
+            >
+              退出登录
+            </el-button>
+          </div>
+        </el-popover>
       </div>
     </aside>
 
@@ -371,37 +382,41 @@ function onKeydown(e: KeyboardEvent) {
           rows="3"
           @keydown="onKeydown"
         ></textarea>
-        <button class="send-btn" :disabled="loading || !input.trim()" @click="submit">
-          {{ loading ? '回答中…' : '发送' }}
-        </button>
+        <el-button
+          type="primary"
+          class="send-btn"
+          :loading="loading"
+          loading-text="回答中…"
+          :disabled="!input.trim()"
+          @click="submit"
+        >
+          发送
+        </el-button>
       </footer>
     </div>
 
-    <Teleport to="body">
-      <div
-        v-if="pendingDelete"
-        ref="deleteDialogRef"
-        class="dialog-mask"
-        tabindex="-1"
-        @click.self="cancelDelete"
-        @keydown.esc.prevent="cancelDelete"
-      >
-        <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="delete-dialog-title">
-          <h3 id="delete-dialog-title" class="dialog-title">删除会话</h3>
-          <p class="dialog-text">
-            确定删除「{{ pendingDelete.title }}」？删除后该会话从列表隐藏，历史消息仍保留在库内。
-          </p>
-          <div class="dialog-actions">
-            <button class="dialog-btn ghost" :disabled="deletingId !== ''" @click="cancelDelete">
-              取消
-            </button>
-            <button class="dialog-btn danger" :disabled="deletingId !== ''" @click="confirmDelete">
-              {{ deletingId === pendingDelete.id ? '删除中…' : '删除' }}
-            </button>
-          </div>
-        </div>
-      </div>
-    </Teleport>
+    <!-- 会话删除确认 -->
+    <el-dialog
+      :model-value="pendingDelete !== null"
+      title="删除会话"
+      width="360px"
+      @close="cancelDelete"
+    >
+      <p v-if="pendingDelete" class="dialog-text">
+        确定删除「{{ pendingDelete.title }}」？删除后该会话从列表隐藏，历史消息仍保留在库内。
+      </p>
+      <template #footer>
+        <el-button :disabled="deletingId !== ''" @click="cancelDelete">取消</el-button>
+        <el-button
+          type="danger"
+          :loading="deletingId !== '' && deletingId === pendingDelete?.id"
+          :disabled="deletingId !== ''"
+          @click="confirmDelete"
+        >
+          删除
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -431,25 +446,8 @@ function onKeydown(e: KeyboardEvent) {
 
 /* 新建会话：置于会话列表上方 */
 .reset-btn {
+  width: 100%;
   margin: 0 0 10px;
-  padding: 6px 12px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  background: #fff;
-  color: #555;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.reset-btn:hover:not(:disabled),
-.reset-btn:focus-visible {
-  border-color: #1a7f37;
-  color: #1a7f37;
-}
-
-.reset-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 
 .conv-empty {
@@ -603,32 +601,6 @@ function onKeydown(e: KeyboardEvent) {
   margin-top: 6px;
 }
 
-.edit-save,
-.edit-cancel {
-  padding: 3px 10px;
-  border-radius: 6px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.edit-save {
-  border: none;
-  background: #1a7f37;
-  color: #fff;
-}
-
-.edit-cancel {
-  border: 1px solid #d0d0d0;
-  background: #fff;
-  color: #555;
-}
-
-.edit-save:disabled,
-.edit-cancel:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
 /* ---------- 右侧主区 ---------- */
 .chat-page {
   display: flex;
@@ -772,19 +744,6 @@ function onKeydown(e: KeyboardEvent) {
   white-space: nowrap;
 }
 
-.user-popover {
-  position: absolute;
-  bottom: 100%;
-  left: 0;
-  min-width: 160px;
-  margin-bottom: 8px;
-  padding: 10px;
-  border: 1px solid #e5e5e5;
-  border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.12);
-}
-
 .pop-username {
   margin: 0 0 8px;
   color: #333;
@@ -792,40 +751,13 @@ function onKeydown(e: KeyboardEvent) {
   font-weight: 600;
 }
 
-.admin-btn {
+.pop-btn {
   width: 100%;
-  margin-bottom: 6px;
-  padding: 7px 0;
-  border: 1px solid #bfe0c8;
-  border-radius: 6px;
-  background: #fff;
-  color: #1a7f37;
-  font-size: 13px;
-  cursor: pointer;
+  margin: 0 0 6px;
 }
 
-.admin-btn:hover {
-  background: #e3f2e6;
-}
-
-.logout-btn {
-  width: 100%;
-  padding: 7px 0;
-  border: 1px solid #f0cfcf;
-  border-radius: 6px;
-  background: #fff;
-  color: #d33;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.logout-btn:hover {
-  background: #fdecec;
-}
-
-.logout-btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.pop-btn:last-child {
+  margin-bottom: 0;
 }
 
 .chat-input {
@@ -845,96 +777,15 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 .send-btn {
-  padding: 10px 22px;
-  border: none;
-  border-radius: 8px;
-  background: #1a7f37;
-  color: #fff;
-  font-size: 15px;
-  cursor: pointer;
-}
-
-.send-btn:disabled {
-  background: #b5cdbd;
-  cursor: not-allowed;
+  min-width: 88px;
 }
 
 /* ---------- 会话删除确认弹框 ---------- */
-.dialog-mask {
-  position: fixed;
-  inset: 0;
-  z-index: 30;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: rgba(20, 22, 26, 0.4);
-  outline: none;
-}
-
-.dialog {
-  width: 100%;
-  max-width: 360px;
-  padding: 18px 20px 16px;
-  border-radius: 12px;
-  background: #fff;
-  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.2);
-  box-sizing: border-box;
-}
-
-.dialog-title {
-  margin: 0 0 6px;
-  color: #333;
-  font-size: 16px;
-  font-weight: 600;
-}
-
 .dialog-text {
-  margin: 0 0 18px;
+  margin: 0;
   color: #666;
   font-size: 13px;
   line-height: 1.6;
   word-break: break-all;
-}
-
-.dialog-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.dialog-btn {
-  min-width: 72px;
-  padding: 7px 16px;
-  border-radius: 8px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.dialog-btn.ghost {
-  border: 1px solid #d0d0d0;
-  background: #fff;
-  color: #555;
-}
-
-.dialog-btn.ghost:hover:not(:disabled) {
-  border-color: #999;
-  color: #333;
-}
-
-.dialog-btn.danger {
-  border: 1px solid #d33;
-  background: #d33;
-  color: #fff;
-}
-
-.dialog-btn.danger:hover:not(:disabled) {
-  border-color: #b92b2b;
-  background: #b92b2b;
-}
-
-.dialog-btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
 }
 </style>

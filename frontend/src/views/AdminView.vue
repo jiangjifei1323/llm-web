@@ -13,7 +13,7 @@ type MenuKey = 'settings' | 'users'
 interface MenuNode {
   key: MenuKey
   label: string
-  /** 下级菜单；有子项时父项右侧显示展开箭头 */
+  /** 下级菜单；有子项时父项渲染为可展开分组 */
   children?: MenuNode[]
 }
 
@@ -24,7 +24,7 @@ const menus: MenuNode[] = [
 
 const activeKey = ref<MenuKey>('settings')
 // 默认展开「系统设置」分组，用户管理一眼可见
-const openGroups = ref<Record<string, boolean>>({ settings: true })
+const defaultOpeneds = ['settings']
 
 function findMenu(key: MenuKey): MenuNode | undefined {
   for (const menu of menus) {
@@ -37,16 +37,9 @@ function findMenu(key: MenuKey): MenuNode | undefined {
 
 const activeLabel = computed(() => findMenu(activeKey.value)?.label ?? '')
 
-/** 点父项：切换内容并展开/收起其下级菜单；点子项：只切换内容。 */
-function selectMenu(node: MenuNode) {
-  activeKey.value = node.key
-  if (node.children) {
-    openGroups.value[node.key] = !openGroups.value[node.key]
-  }
-}
-
-function isGroupOpen(node: MenuNode): boolean {
-  return Boolean(node.children && openGroups.value[node.key])
+/** el-menu 选中叶子项时回调，index 即菜单 key。 */
+function selectMenu(index: string) {
+  activeKey.value = index as MenuKey
 }
 
 function backToChat() {
@@ -63,33 +56,32 @@ function logout() {
   <div class="admin-layout">
     <aside class="admin-aside">
       <h2 class="aside-title">后台管理</h2>
-      <ul class="menu-list">
-        <li v-for="menu in menus" :key="menu.key">
-          <button
-            class="menu-item"
-            :class="{ active: menu.key === activeKey }"
-            @click="selectMenu(menu)"
-          >
-            <span class="menu-label">{{ menu.label }}</span>
-            <span v-if="menu.children" class="menu-caret">{{ isGroupOpen(menu) ? '▾' : '▸' }}</span>
-          </button>
-          <ul v-if="isGroupOpen(menu)" class="submenu-list">
-            <li v-for="child in menu.children" :key="child.key">
-              <button
-                class="menu-item submenu"
-                :class="{ active: child.key === activeKey }"
-                @click="selectMenu(child)"
-              >
-                <span class="menu-label">{{ child.label }}</span>
-              </button>
-            </li>
-          </ul>
-        </li>
-      </ul>
+
+      <el-menu
+        :default-active="activeKey"
+        :default-openeds="defaultOpeneds"
+        class="side-menu"
+        @select="selectMenu"
+      >
+        <template v-for="menu in menus" :key="menu.key">
+          <el-sub-menu v-if="menu.children && menu.children.length" :index="menu.key">
+            <template #title>
+              <el-icon><Setting /></el-icon>
+              <span>{{ menu.label }}</span>
+            </template>
+            <el-menu-item v-for="child in menu.children" :key="child.key" :index="child.key">
+              {{ child.label }}
+            </el-menu-item>
+          </el-sub-menu>
+          <el-menu-item v-else :index="menu.key">
+            <span>{{ menu.label }}</span>
+          </el-menu-item>
+        </template>
+      </el-menu>
 
       <div class="aside-footer">
         <span class="aside-user">{{ username }}</span>
-        <button class="link-btn" @click="logout">退出登录</button>
+        <el-button type="danger" link size="small" @click="logout">退出登录</el-button>
       </div>
     </aside>
 
@@ -99,7 +91,7 @@ function logout() {
           <h1>{{ activeLabel }}</h1>
           <p class="subtitle">仅管理员可见的后台配置区域</p>
         </div>
-        <button class="back-btn" @click="backToChat">返回聊天</button>
+        <el-button plain type="primary" @click="backToChat">返回聊天</el-button>
       </header>
 
       <section v-if="activeKey === 'settings'" class="panel">
@@ -123,7 +115,7 @@ function logout() {
 .admin-aside {
   display: flex;
   flex-direction: column;
-  width: 200px;
+  width: 220px;
   flex-shrink: 0;
   padding: 16px 12px;
   border-right: 1px solid #e5e5e5;
@@ -138,59 +130,14 @@ function logout() {
   font-weight: 600;
 }
 
-.menu-list {
+.side-menu {
   flex: 1;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.menu-item {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  padding: 9px 12px;
-  border: none;
-  border-radius: 8px;
+  border-right: none;
   background: transparent;
-  color: #555;
-  font-size: 14px;
-  text-align: left;
-  cursor: pointer;
 }
 
-.menu-label {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.menu-caret {
-  color: #999;
-  font-size: 11px;
-}
-
-.submenu-list {
-  margin: 2px 0 0;
-  padding: 0 0 0 12px;
-  list-style: none;
-}
-
-.menu-item.submenu {
-  padding: 7px 12px;
-  font-size: 13px;
-}
-
-.menu-item:hover {
-  background: #ececec;
-  color: #333;
-}
-
-.menu-item.active {
+.side-menu :deep(.el-menu-item.is-active) {
   background: #e3f2e6;
-  color: #1a7f37;
   font-weight: 600;
 }
 
@@ -205,26 +152,12 @@ function logout() {
 }
 
 .aside-user {
-  max-width: 90px;
+  max-width: 110px;
   overflow: hidden;
   color: #666;
   font-size: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.link-btn {
-  padding: 4px 8px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: #d33;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.link-btn:hover {
-  background: #fdecec;
 }
 
 /* ---------- 右侧内容 ---------- */
@@ -256,20 +189,6 @@ function logout() {
   margin: 0;
   color: #888;
   font-size: 13px;
-}
-
-.back-btn {
-  padding: 7px 14px;
-  border: 1px solid #1a7f37;
-  border-radius: 8px;
-  background: #fff;
-  color: #1a7f37;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.back-btn:hover {
-  background: #e3f2e6;
 }
 
 .panel {
