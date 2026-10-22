@@ -1,0 +1,12 @@
+node_modules
+dist
+dist-ssr
+.git
+.vscode
+coverage
+playwright-report
+test-results
+*.log
+*.local
+.env
+.DS_Store
