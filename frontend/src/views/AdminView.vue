@@ -3,12 +3,13 @@ import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 
 import UserManagement from '@/components/UserManagement.vue'
+import TokenStatistics from '@/components/TokenStatistics.vue'
 import { clearAuth, getUsername } from '@/api/auth'
 
 const router = useRouter()
 const username = ref(getUsername() ?? '')
 
-type MenuKey = 'settings' | 'users'
+type MenuKey = 'dashboard' | 'token_stats' | 'settings' | 'users'
 
 interface MenuNode {
   key: MenuKey
@@ -19,12 +20,17 @@ interface MenuNode {
 
 /** 后台功能菜单；新增菜单只需往树里追加一项，并补对应的内容分支。 */
 const menus: MenuNode[] = [
+  {
+    key: 'dashboard',
+    label: '数据统计',
+    children: [{ key: 'token_stats', label: 'Token 用量' }],
+  },
   { key: 'settings', label: '系统设置', children: [{ key: 'users', label: '用户管理' }] },
 ]
 
-const activeKey = ref<MenuKey>('settings')
-// 默认展开「系统设置」分组，用户管理一眼可见
-const defaultOpeneds = ['settings']
+const activeKey = ref<MenuKey>('token_stats')
+// 默认展开「数据统计」分组
+const defaultOpeneds = ['dashboard']
 
 function findMenu(key: MenuKey): MenuNode | undefined {
   for (const menu of menus) {
@@ -100,6 +106,7 @@ function logout() {
       </section>
 
       <UserManagement v-else-if="activeKey === 'users'" />
+      <TokenStatistics v-else-if="activeKey === 'token_stats'" />
     </div>
   </div>
 </template>

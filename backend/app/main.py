@@ -18,6 +18,7 @@ from .api import (
     conversations_router,
     feedback_router,
     health_router,
+    statistics_router,
     usage_router,
 )
 
@@ -48,4 +49,5 @@ app.include_router(chat_router)
 app.include_router(conversations_router)
 app.include_router(feedback_router)
 app.include_router(usage_router)
+app.include_router(statistics_router)
 app.include_router(admin_router)
