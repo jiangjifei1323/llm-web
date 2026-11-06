@@ -185,11 +185,25 @@ def load_conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
     for r in rows:
         result.append({"role": "user", "content": r.question})
         if r.answer is not None:
+            # 从 llm_calls 表查询该消息的 token 用量
+            with SessionLocal() as llm_session:
+                from sqlalchemy import select as sa_select
+                from .models import LLMCall
+                llm_call = llm_session.scalar(
+                    sa_select(LLMCall).where(
+                        LLMCall.conversation_id == conversation_id,
+                        LLMCall.output == r.answer,
+                        LLMCall.success.is_(True),
+                    ).order_by(LLMCall.id.desc()).limit(1)
+                )
             result.append({
                 "role": "assistant",
                 "content": r.answer,
                 "id": r.id,
                 "rating": r.rating,
+                "input_tokens": llm_call.input_tokens if llm_call else None,
+                "output_tokens": llm_call.output_tokens if llm_call else None,
+                "total_tokens": llm_call.total_tokens if llm_call else None,
             })
     return result
 

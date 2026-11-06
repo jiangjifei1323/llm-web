@@ -6,6 +6,9 @@ export interface ChatMessage {
   content: string
   id?: number  // 消息 ID，用于反馈
   rating?: number  // 用户反馈：1=踩, 2=赞
+  input_tokens?: number  // 输入 token 数（仅助手消息）
+  output_tokens?: number  // 输出 token 数（仅助手消息）
+  total_tokens?: number  // 总 token 数（仅助手消息）
 }
 
 /** 左侧会话列表的一条摘要 */
@@ -50,8 +53,8 @@ export interface StreamChatOptions {
   onDelta: (delta: string) => void
   /** 首条 meta 事件回调（模型名、后端生成或沿用的会话 id） */
   onMeta?: (meta: { model?: string; conversationId?: string }) => void
-  /** 完成事件回调（携带消息 ID，用于反馈） */
-  onDone?: (data: { messageId?: number }) => void
+  /** 完成事件回调（携带消息 ID 和 token 用量） */
+  onDone?: (data: { messageId?: number; inputTokens?: number; outputTokens?: number; totalTokens?: number }) => void
 }
 
 /**
@@ -126,13 +129,21 @@ export async function streamChat(
         conversation_id?: string
         done?: boolean
         message_id?: number
+        input_tokens?: number
+        output_tokens?: number
+        total_tokens?: number
       }
       if (parsed.error) throw new Error(parsed.error)
       if (parsed.model || parsed.conversation_id) {
         onMeta?.({ model: parsed.model, conversationId: parsed.conversation_id })
       }
       if (parsed.done) {
-        onDone?.({ messageId: parsed.message_id })
+        onDone?.({
+          messageId: parsed.message_id,
+          inputTokens: parsed.input_tokens,
+          outputTokens: parsed.output_tokens,
+          totalTokens: parsed.total_tokens,
+        })
       }
       if (parsed.delta) onDelta(parsed.delta)
     }

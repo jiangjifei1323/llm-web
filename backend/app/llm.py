@@ -10,7 +10,8 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from openai import OpenAI
 
 # role -> LangChain 消息类型
 _ROLE_MAP: dict[str, type[BaseMessage]] = {
@@ -208,3 +209,76 @@ def chat_completion_stream(
             "latency_ms": int((time.perf_counter() - start) * 1000),
         }
     )
+
+
+# =============================================================================
+# Embedding 模型
+# =============================================================================
+
+
+def _build_embeddings() -> OpenAIEmbeddings:
+    """根据环境变量构造 OpenAIEmbeddings 实例。"""
+    return OpenAIEmbeddings(
+        api_key=os.getenv("EMBEDDING_API_KEY", "").strip(),
+        base_url=os.getenv("EMBEDDING_BASE_URL", "").strip(),
+        model=os.getenv("EMBEDDING_MODEL", "text-embedding-v3"),
+    )
+
+
+def get_embeddings() -> OpenAIEmbeddings:
+    """获取 Embedding 实例（用于向量化文本）。"""
+    return _build_embeddings()
+
+
+def embed_text(text: str) -> list[float]:
+    """将文本转换为向量。"""
+    embeddings = _build_embeddings()
+    return embeddings.embed_query(text)
+
+
+def embed_documents(texts: list[str]) -> list[list[float]]:
+    """将多个文本转换为向量列表。"""
+    embeddings = _build_embeddings()
+    return embeddings.embed_documents(texts)
+
+
+# =============================================================================
+# Rerank 模型
+# =============================================================================
+
+
+def _build_rerank_client() -> OpenAI:
+    """根据环境变量构造 OpenAI 客户端（用于 rerank）。"""
+    api_key = os.getenv("RERANK_API_KEY", "").strip()
+    base_url = os.getenv("RERANK_BASE_URL", "").strip()
+    if not api_key or not base_url:
+        raise RuntimeError("Rerank 模型未配置，请检查 RERANK_API_KEY 和 RERANK_BASE_URL")
+    # base_url 应为完整的 rerank 端点父路径
+    return OpenAI(api_key=api_key, base_url=base_url)
+
+
+def rerank(query: str, documents: list[str], top_n: int | None = None) -> list[dict]:
+    """对文档列表进行重排序。
+
+    Args:
+        query: 查询文本
+        documents: 待排序的文档列表
+        top_n: 返回前 N 个结果，None 表示返回全部
+
+    Returns:
+        排序后的文档列表，每项包含 index、relevance_score、document
+    """
+    client = _build_rerank_client()
+    model = os.getenv("RERANK_MODEL", "qwen3-rerank")
+
+    kwargs: dict = {
+        "model": model,
+        "query": query,
+        "documents": documents,
+    }
+    if top_n is not None:
+        kwargs["top_n"] = top_n
+
+    # 调用 /reranks 端点
+    response = client.post("/reranks", body=kwargs, cast_to=dict)
+    return response.get("results", [])

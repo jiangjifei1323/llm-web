@@ -98,8 +98,14 @@ def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -
                 usage.input_tokens, usage.output_tokens, usage.total_tokens,
                 latency_ms, success=True,
             )
-            # 携带消息 ID 的结束事件
-            yield _sse({"done": True, "message_id": message_id})
+            # 携带消息 ID 和 token 用量的结束事件
+            yield _sse({
+                "done": True,
+                "message_id": message_id,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "total_tokens": usage.total_tokens,
+            })
             yield "data: [DONE]\n\n"
         except RuntimeError as exc:
             # 流已开始、无法再改状态码，故以 error 事件下发；同时记录失败的调用

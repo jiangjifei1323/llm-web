@@ -8,14 +8,12 @@ import { clearAuth, fetchMe, getUsername, isAdmin } from '@/api/auth'
 import {
   deleteConversation,
   fetchConversationMessages,
-  fetchConversationUsage,
   fetchConversations,
   renameConversation,
   streamChat,
   submitFeedback,
   type ChatMessage,
   type ConversationSummary,
-  type ConversationUsage,
 } from '@/api/chat'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 
@@ -45,14 +43,6 @@ const historyLoading = ref(false)
 const searchKeyword = ref('')
 let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
-// Token 用量
-const usage = ref<ConversationUsage>({
-  input_tokens: 0,
-  output_tokens: 0,
-  total_tokens: 0,
-  call_count: 0,
-})
-
 // 会话 id：持久化在 sessionStorage，刷新页面仍可延续同一会话
 const CONVERSATION_KEY = 'llm_conversation_id'
 const conversationId = ref<string | null>(sessionStorage.getItem(CONVERSATION_KEY))
@@ -66,21 +56,6 @@ function resetConversation() {
   errorMsg.value = ''
   conversationId.value = null
   sessionStorage.removeItem(CONVERSATION_KEY)
-  // 重置用量
-  usage.value = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 }
-}
-
-// 加载用量
-async function loadUsage() {
-  if (!conversationId.value) {
-    usage.value = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 }
-    return
-  }
-  try {
-    usage.value = await fetchConversationUsage(conversationId.value)
-  } catch {
-    // 静默失败
-  }
 }
 
 // 停止生成
@@ -157,8 +132,6 @@ async function loadHistory(id: string) {
     conversationId.value = id
     sessionStorage.setItem(CONVERSATION_KEY, id)
     await scrollToBottom()
-    // 加载该会话的用量
-    await loadUsage()
   } catch (err) {
     errorMsg.value = `历史消息加载失败：${errText(err)}`
   } finally {
@@ -307,8 +280,11 @@ async function submit() {
       },
       onDone: (data) => {
         const reply = messages.value[replyIndex]
-        if (reply && data.messageId) {
-          reply.id = data.messageId
+        if (reply) {
+          if (data.messageId) reply.id = data.messageId
+          if (data.inputTokens !== undefined) reply.input_tokens = data.inputTokens
+          if (data.outputTokens !== undefined) reply.output_tokens = data.outputTokens
+          if (data.totalTokens !== undefined) reply.total_tokens = data.totalTokens
         }
       },
     })
@@ -332,7 +308,6 @@ async function submit() {
     // 本轮问答已落库，刷新列表以出现新会话或更新标题时间
     if (conversationId.value) {
       void loadConversations()
-      void loadUsage()
     }
   }
 }
@@ -466,11 +441,6 @@ function onKeydown(e: KeyboardEvent) {
       <header class="chat-header">
         <h1>问答助手</h1>
         <p class="subtitle">基于 Vue + FastAPI 的基础问答</p>
-        <div v-if="conversationId && usage.call_count > 0" class="usage-info">
-          <span>Token: {{ usage.total_tokens.toLocaleString() }}</span>
-          <span class="usage-separator">|</span>
-          <span>调用: {{ usage.call_count }} 次</span>
-        </div>
       </header>
 
       <div ref="listRef" class="message-list">
@@ -505,6 +475,9 @@ function onKeydown(e: KeyboardEvent) {
                 >
                   <el-icon><SortDown /></el-icon>
                 </button>
+                <span v-if="msg.total_tokens" class="token-info">
+                  {{ msg.total_tokens }} tokens
+                </span>
               </div>
             </template>
             <template v-else>
@@ -805,18 +778,6 @@ function onKeydown(e: KeyboardEvent) {
   font-size: 13px;
 }
 
-/* Token 用量展示 */
-.usage-info {
-  margin-top: 6px;
-  font-size: 12px;
-  color: #666;
-}
-
-.usage-separator {
-  margin: 0 6px;
-  color: #ccc;
-}
-
 .message-list {
   flex: 1;
   overflow-y: auto;
@@ -848,7 +809,6 @@ function onKeydown(e: KeyboardEvent) {
   max-width: 80%;
   padding: 10px 14px;
   border-radius: 12px;
-  white-space: pre-wrap;
   word-break: break-word;
   line-height: 1.6;
   font-size: 15px;
@@ -864,6 +824,18 @@ function onKeydown(e: KeyboardEvent) {
   background: #f2f3f5;
   color: #333;
   border-bottom-left-radius: 4px;
+}
+
+.message-row.assistant .bubble :deep(p) {
+  margin: 6px 0;
+}
+
+.message-row.assistant .bubble :deep(p:first-child) {
+  margin-top: 0;
+}
+
+.message-row.assistant .bubble :deep(p:last-child) {
+  margin-bottom: 0;
 }
 
 .bubble.thinking {
@@ -1004,6 +976,12 @@ function onKeydown(e: KeyboardEvent) {
 .action-btn.active {
   color: #1a7f37;
   background: #e6f2ea;
+}
+
+.token-info {
+  margin-left: auto;
+  font-size: 12px;
+  color: #888;
 }
 
 /* ---------- 会话删除确认弹框 ---------- */

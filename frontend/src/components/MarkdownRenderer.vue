@@ -10,22 +10,18 @@ const props = defineProps<{
   content: string
 }>()
 
-// 配置 marked - 使用 walkTokens 进行代码高亮
+// 配置 marked - 使用 renderer 进行代码高亮
 marked.use({
-  walkTokens(token) {
-    if (token.type === 'code') {
-      const lang = token.lang || ''
-      if (lang && hljs.getLanguage(lang)) {
-        token.text = hljs.highlight(token.text, { language: lang }).value
-        token.escaped = true
-      }
-    }
-  },
   renderer: {
-    code({ text, lang, escaped }: { text: string; lang?: string; escaped?: boolean }) {
+    code({ text, lang }: { text: string; lang?: string }) {
+      let highlighted: string
+      if (lang && hljs.getLanguage(lang)) {
+        highlighted = hljs.highlight(text, { language: lang }).value
+      } else {
+        highlighted = hljs.highlightAuto(text).value
+      }
       const langClass = lang ? ` language-${lang}` : ''
-      const code = escaped ? text : text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-      return `<pre><code class="hljs${langClass}">${code}</code></pre>\n`
+      return `<pre><code class="hljs${langClass}">${highlighted}</code></pre>\n`
     },
   },
   breaks: true,
@@ -46,19 +42,22 @@ const renderedHtml = computed(() => {
 .markdown-body {
   line-height: 1.6;
   word-break: break-word;
+  color: #333;
 }
 
 .markdown-body :deep(pre) {
   background: #f6f8fa;
   border-radius: 6px;
-  padding: 12px;
+  padding: 12px 16px;
   overflow-x: auto;
-  margin: 8px 0;
+  margin: 12px 0;
+  border: 1px solid #e5e7eb;
 }
 
 .markdown-body :deep(code) {
   font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
   font-size: 14px;
+  background: transparent;
 }
 
 .markdown-body :deep(p code) {
@@ -71,7 +70,7 @@ const renderedHtml = computed(() => {
 .markdown-body :deep(table) {
   border-collapse: collapse;
   width: 100%;
-  margin: 8px 0;
+  margin: 12px 0;
 }
 
 .markdown-body :deep(th),
@@ -96,6 +95,10 @@ const renderedHtml = computed(() => {
   margin: 4px 0;
 }
 
+.markdown-body :deep(li p) {
+  margin: 4px 0;
+}
+
 .markdown-body :deep(blockquote) {
   border-left: 4px solid #ddd;
   padding-left: 12px;
@@ -110,5 +113,24 @@ const renderedHtml = computed(() => {
 
 .markdown-body :deep(a:hover) {
   text-decoration: underline;
+}
+
+.markdown-body :deep(h1),
+.markdown-body :deep(h2),
+.markdown-body :deep(h3),
+.markdown-body :deep(h4) {
+  margin-top: 16px;
+  margin-bottom: 8px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.markdown-body :deep(h1) { font-size: 1.5em; }
+.markdown-body :deep(h2) { font-size: 1.3em; }
+.markdown-body :deep(h3) { font-size: 1.15em; }
+.markdown-body :deep(h4) { font-size: 1em; }
+
+.markdown-body :deep(p) {
+  margin: 8px 0;
 }
 </style>
