@@ -1,4 +1,4 @@
-"""数据层。按职责拆分为 base / models / migrations / users / conversations，
+"""数据层。按职责拆分为 base / models / migrations / users / conversations / messages，
 
 对外统一从这里导出，调用方仍可用 `from . import db` + `db.xxx()` 的方式访问。
 """
@@ -14,7 +14,9 @@ from .conversations import (
     new_conversation_id,
     rename_conversation,
     save_chat_round,
+    save_chat_round_with_id,
 )
+from .messages import get_message_rating, set_message_rating
 from .migrations import init_db
 from .models import TITLE_MAX_LEN, Conversation, LLMCall, Message, User
 from .users import (
@@ -54,10 +56,13 @@ __all__ = [
     "get_conversation",
     "claim_conversation",
     "save_chat_round",
+    "save_chat_round_with_id",
     "log_llm_call",
     "rename_conversation",
     "delete_conversation",
     "load_conversation_messages",
     "list_user_conversations",
     "new_conversation_id",
+    "set_message_rating",
+    "get_message_rating",
 ]

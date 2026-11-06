@@ -1,17 +1,23 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage } from 'element-plus'
+import { CopyDocument, SortUp, SortDown } from '@element-plus/icons-vue'
 
 import { clearAuth, fetchMe, getUsername, isAdmin } from '@/api/auth'
 import {
   deleteConversation,
   fetchConversationMessages,
+  fetchConversationUsage,
   fetchConversations,
   renameConversation,
   streamChat,
+  submitFeedback,
   type ChatMessage,
   type ConversationSummary,
+  type ConversationUsage,
 } from '@/api/chat'
+import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
 
 const router = useRouter()
 const username = ref(getUsername() ?? '')
@@ -28,9 +34,24 @@ const listRef = ref<HTMLElement | null>(null)
 // 用户入口弹框显隐，交由 el-popover 的 v-model:visible 管理
 const userMenuOpen = ref(false)
 
+// AbortController 用于中断流式请求
+const abortController = ref<AbortController | null>(null)
+
 // 左侧会话列表
 const conversations = ref<ConversationSummary[]>([])
 const historyLoading = ref(false)
+
+// 会话搜索
+const searchKeyword = ref('')
+let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
+
+// Token 用量
+const usage = ref<ConversationUsage>({
+  input_tokens: 0,
+  output_tokens: 0,
+  total_tokens: 0,
+  call_count: 0,
+})
 
 // 会话 id：持久化在 sessionStorage，刷新页面仍可延续同一会话
 const CONVERSATION_KEY = 'llm_conversation_id'
@@ -45,6 +66,52 @@ function resetConversation() {
   errorMsg.value = ''
   conversationId.value = null
   sessionStorage.removeItem(CONVERSATION_KEY)
+  // 重置用量
+  usage.value = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 }
+}
+
+// 加载用量
+async function loadUsage() {
+  if (!conversationId.value) {
+    usage.value = { input_tokens: 0, output_tokens: 0, total_tokens: 0, call_count: 0 }
+    return
+  }
+  try {
+    usage.value = await fetchConversationUsage(conversationId.value)
+  } catch {
+    // 静默失败
+  }
+}
+
+// 停止生成
+function stopGeneration() {
+  if (abortController.value) {
+    abortController.value.abort()
+    abortController.value = null
+  }
+  loading.value = false
+}
+
+// 复制消息
+async function copyMessage(content: string) {
+  try {
+    await navigator.clipboard.writeText(content)
+    ElMessage.success('已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败')
+  }
+}
+
+// 提交反馈
+async function handleFeedback(msg: ChatMessage, rating: number) {
+  if (!msg.id) return
+  try {
+    await submitFeedback(msg.id, rating)
+    msg.rating = rating
+    ElMessage.success(rating === 2 ? '感谢点赞' : '已收到反馈')
+  } catch {
+    ElMessage.error('反馈提交失败')
+  }
 }
 
 function logout() {
@@ -65,12 +132,20 @@ async function scrollToBottom() {
   listRef.value?.scrollTo({ top: listRef.value.scrollHeight })
 }
 
-async function loadConversations() {
+async function loadConversations(keyword?: string) {
   try {
-    conversations.value = await fetchConversations()
+    conversations.value = await fetchConversations(keyword)
   } catch (err) {
     errorMsg.value = `会话列表加载失败：${errText(err)}`
   }
+}
+
+// 搜索防抖
+function onSearchInput() {
+  if (searchDebounceTimer) clearTimeout(searchDebounceTimer)
+  searchDebounceTimer = setTimeout(() => {
+    void loadConversations(searchKeyword.value)
+  }, 300)
 }
 
 /** 拉取指定会话的历史消息并切换为当前会话。 */
@@ -82,6 +157,8 @@ async function loadHistory(id: string) {
     conversationId.value = id
     sessionStorage.setItem(CONVERSATION_KEY, id)
     await scrollToBottom()
+    // 加载该会话的用量
+    await loadUsage()
   } catch (err) {
     errorMsg.value = `历史消息加载失败：${errText(err)}`
   } finally {
@@ -201,6 +278,10 @@ async function submit() {
   messages.value.push({ role: 'user', content: question })
   input.value = ''
   loading.value = true
+
+  // 创建 AbortController
+  abortController.value = new AbortController()
+
   await scrollToBottom()
 
   // 先插入一条空的助手消息，流式增量逐块填充进去
@@ -212,6 +293,7 @@ async function submit() {
     const history = messages.value.slice(0, -2)
     await streamChat(question, history, {
       conversationId: conversationId.value,
+      signal: abortController.value.signal,
       onMeta: (meta) => {
         if (meta.conversationId) {
           conversationId.value = meta.conversationId
@@ -223,20 +305,35 @@ async function submit() {
         if (reply) reply.content += delta
         void scrollToBottom()
       },
+      onDone: (data) => {
+        const reply = messages.value[replyIndex]
+        if (reply && data.messageId) {
+          reply.id = data.messageId
+        }
+      },
     })
   } catch (err) {
-    errorMsg.value = errText(err)
-    const reply = messages.value[replyIndex]
-    if (reply && !reply.content) {
-      // 尚未收到任何内容，移除空占位并把问题还给输入框
-      messages.value.splice(replyIndex, 1)
-      input.value = question
+    // 用户主动取消不显示错误
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      // 保留已生成的内容
+    } else {
+      errorMsg.value = errText(err)
+      const reply = messages.value[replyIndex]
+      if (reply && !reply.content) {
+        // 尚未收到任何内容，移除空占位并把问题还给输入框
+        messages.value.splice(replyIndex, 1)
+        input.value = question
+      }
     }
   } finally {
     loading.value = false
+    abortController.value = null
     await scrollToBottom()
     // 本轮问答已落库，刷新列表以出现新会话或更新标题时间
-    if (conversationId.value) void loadConversations()
+    if (conversationId.value) {
+      void loadConversations()
+      void loadUsage()
+    }
   }
 }
 
@@ -252,12 +349,26 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div class="chat-layout">
     <aside class="sidebar">
-      <h2 class="sidebar-title">会话列表</h2>
-      <el-button class="reset-btn" :disabled="loading" @click="resetConversation">
-        新建会话
-      </el-button>
+      <div class="sidebar-header">
+        <h2 class="sidebar-title">会话列表</h2>
+        <el-button class="reset-btn" :disabled="loading" @click="resetConversation">
+          新建
+        </el-button>
+      </div>
 
-      <p v-if="conversations.length === 0" class="conv-empty">暂无历史会话</p>
+      <div class="search-box">
+        <input
+          v-model="searchKeyword"
+          type="text"
+          class="search-input"
+          placeholder="搜索会话..."
+          @input="onSearchInput"
+        />
+      </div>
+
+      <p v-if="conversations.length === 0" class="conv-empty">
+        {{ searchKeyword ? '未找到匹配会话' : '暂无历史会话' }}
+      </p>
       <ul v-else class="conv-list">
         <li v-for="conv in conversations" :key="conv.id" class="conv-row">
           <form
@@ -355,6 +466,11 @@ function onKeydown(e: KeyboardEvent) {
       <header class="chat-header">
         <h1>问答助手</h1>
         <p class="subtitle">基于 Vue + FastAPI 的基础问答</p>
+        <div v-if="conversationId && usage.call_count > 0" class="usage-info">
+          <span>Token: {{ usage.total_tokens.toLocaleString() }}</span>
+          <span class="usage-separator">|</span>
+          <span>调用: {{ usage.call_count }} 次</span>
+        </div>
       </header>
 
       <div ref="listRef" class="message-list">
@@ -366,8 +482,34 @@ function onKeydown(e: KeyboardEvent) {
           class="message-row"
           :class="msg.role"
         >
-          <div class="bubble" :class="{ thinking: msg.role === 'assistant' && !msg.content }">
-            {{ msg.content || (loading && index === messages.length - 1 ? '思考中…' : '') }}
+          <div class="bubble" :class="{ thinking: msg.role === 'assistant' && !msg.content && loading && index === messages.length - 1 }">
+            <template v-if="msg.role === 'assistant' && msg.content">
+              <MarkdownRenderer :content="msg.content" />
+              <div v-if="!loading || index !== messages.length - 1" class="message-actions">
+                <button class="action-btn" title="复制" @click="copyMessage(msg.content)">
+                  <el-icon><CopyDocument /></el-icon>
+                </button>
+                <button
+                  class="action-btn"
+                  :class="{ active: msg.rating === 2 }"
+                  title="点赞"
+                  @click="handleFeedback(msg, 2)"
+                >
+                  <el-icon><SortUp /></el-icon>
+                </button>
+                <button
+                  class="action-btn"
+                  :class="{ active: msg.rating === 1 }"
+                  title="踩"
+                  @click="handleFeedback(msg, 1)"
+                >
+                  <el-icon><SortDown /></el-icon>
+                </button>
+              </div>
+            </template>
+            <template v-else>
+              {{ msg.content || (loading && index === messages.length - 1 ? '思考中…' : '') }}
+            </template>
           </div>
         </div>
       </div>
@@ -383,10 +525,17 @@ function onKeydown(e: KeyboardEvent) {
           @keydown="onKeydown"
         ></textarea>
         <el-button
+          v-if="loading"
+          type="danger"
+          class="send-btn"
+          @click="stopGeneration"
+        >
+          停止
+        </el-button>
+        <el-button
+          v-else
           type="primary"
           class="send-btn"
-          :loading="loading"
-          loading-text="回答中…"
           :disabled="!input.trim()"
           @click="submit"
         >
@@ -438,16 +587,42 @@ function onKeydown(e: KeyboardEvent) {
   box-sizing: border-box;
 }
 
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
 .sidebar-title {
-  margin: 0 0 8px;
+  margin: 0;
   font-size: 14px;
   color: #666;
+  flex: 1;
 }
 
 /* 新建会话：置于会话列表上方 */
 .reset-btn {
+  flex-shrink: 0;
+}
+
+/* 搜索框 */
+.search-box {
+  margin-bottom: 10px;
+}
+
+.search-input {
   width: 100%;
-  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  font-size: 13px;
+  box-sizing: border-box;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: #1a7f37;
 }
 
 .conv-empty {
@@ -630,6 +805,18 @@ function onKeydown(e: KeyboardEvent) {
   font-size: 13px;
 }
 
+/* Token 用量展示 */
+.usage-info {
+  margin-top: 6px;
+  font-size: 12px;
+  color: #666;
+}
+
+.usage-separator {
+  margin: 0 6px;
+  color: #ccc;
+}
+
 .message-list {
   flex: 1;
   overflow-y: auto;
@@ -778,6 +965,45 @@ function onKeydown(e: KeyboardEvent) {
 
 .send-btn {
   min-width: 88px;
+}
+
+/* ---------- 消息操作按钮 ---------- */
+.message-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+
+.message-row.assistant:hover .message-actions {
+  opacity: 1;
+}
+
+.action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #666;
+  font-size: 14px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.action-btn:hover {
+  background: #e8e8e8;
+  color: #1a7f37;
+}
+
+.action-btn.active {
+  color: #1a7f37;
+  background: #e6f2ea;
 }
 
 /* ---------- 会话删除确认弹框 ---------- */

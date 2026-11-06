@@ -1,6 +1,6 @@
 """会话接口：列表、改名、删除与历史消息查询。"""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from .. import auth, db
 from ..db import User
@@ -17,9 +17,15 @@ router = APIRouter(prefix="/api/conversations", tags=["会话"])
 
 
 @router.get("", response_model=list[ConversationSummary])
-def list_conversations(user: User = Depends(auth.get_current_user)) -> list[ConversationSummary]:
-    """当前用户的会话列表（供前端左侧栏展示），按最近更新倒序。"""
-    return [ConversationSummary(**item) for item in db.list_user_conversations(user.id)]
+def list_conversations(
+    keyword: str = Query(default="", description="按标题搜索"),
+    user: User = Depends(auth.get_current_user),
+) -> list[ConversationSummary]:
+    """当前用户的会话列表（供前端左侧栏展示），按最近更新倒序。支持按标题搜索。"""
+    return [
+        ConversationSummary(**item)
+        for item in db.list_user_conversations(user.id, keyword=keyword)
+    ]
 
 
 @router.patch("/{conversation_id}", response_model=RenamedConversation)
@@ -54,10 +60,10 @@ def delete_conversation(
 @router.get("/{conversation_id}/messages")
 def conversation_messages(
     conversation_id: str, user: User = Depends(auth.get_current_user)
-) -> list[ChatMessage]:
-    """查询某个会话的完整历史消息。"""
+) -> list[dict]:
+    """查询某个会话的完整历史消息（含 id 和 rating）。"""
     check_conversation_access(conversation_id, user)
     messages = db.load_conversation_messages(conversation_id)
     if not messages:
         raise HTTPException(status_code=404, detail="会话不存在或暂无消息")
-    return [ChatMessage(**m) for m in messages]
+    return messages

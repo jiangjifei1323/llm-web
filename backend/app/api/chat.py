@@ -89,12 +89,17 @@ def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -
             usage: TokenUsage = result_out.get("usage", TokenUsage())
             latency_ms = result_out.get("latency_ms")
 
-            db.save_chat_round(conversation_id, req.message, answer, model, user_id=user.id)
+            # 保存问答并获取消息 ID
+            message_id = db.save_chat_round_with_id(
+                conversation_id, req.message, answer, model, user_id=user.id
+            )
             db.log_llm_call(
                 conversation_id, user.id, model, messages, answer,
                 usage.input_tokens, usage.output_tokens, usage.total_tokens,
                 latency_ms, success=True,
             )
+            # 携带消息 ID 的结束事件
+            yield _sse({"done": True, "message_id": message_id})
             yield "data: [DONE]\n\n"
         except RuntimeError as exc:
             # 流已开始、无法再改状态码，故以 error 事件下发；同时记录失败的调用

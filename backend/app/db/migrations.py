@@ -15,6 +15,7 @@ def init_db() -> None:
     _migrate_conversations_title()
     _migrate_conversations_deleted_at()
     _migrate_users_deleted_at()
+    _migrate_messages_rating()
     _migrate_timestamp_columns()
 
 
@@ -152,3 +153,15 @@ def _migrate_timestamp_columns() -> None:
                     "THEN created_at AT TIME ZONE 'Asia/Shanghai' ELSE created_at END"
                 )
             )
+
+
+def _migrate_messages_rating() -> None:
+    """新增 messages.rating 列（用户反馈：1=踩, 2=赞）。"""
+    insp = inspect(engine)
+    if "messages" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("messages")}
+    if "rating" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE messages ADD COLUMN rating INTEGER"))

@@ -4,6 +4,8 @@ import { requestJson } from './http'
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
+  id?: number  // 消息 ID，用于反馈
+  rating?: number  // 用户反馈：1=踩, 2=赞
 }
 
 /** 左侧会话列表的一条摘要 */
@@ -13,12 +15,13 @@ export interface ConversationSummary {
   updated_at: string
 }
 
-/** 当前用户的会话列表，按最近更新倒序。 */
-export function fetchConversations(): Promise<ConversationSummary[]> {
-  return requestJson<ConversationSummary[]>('/api/conversations')
+/** 当前用户的会话列表，按最近更新倒序。支持按标题搜索。 */
+export function fetchConversations(keyword?: string): Promise<ConversationSummary[]> {
+  const params = keyword ? `?keyword=${encodeURIComponent(keyword)}` : ''
+  return requestJson<ConversationSummary[]>(`/api/conversations${params}`)
 }
 
-/** 某个会话的历史消息（role/content 序列）。 */
+/** 某个会话的历史消息（role/content/id/rating 序列）。 */
 export function fetchConversationMessages(conversationId: string): Promise<ChatMessage[]> {
   return requestJson<ChatMessage[]>(`/api/conversations/${conversationId}/messages`)
 }
@@ -42,9 +45,13 @@ export function deleteConversation(conversationId: string): Promise<string> {
 export interface StreamChatOptions {
   /** 会话 id，用于后端把问答落库并延续上下文；首轮可传 null */
   conversationId?: string | null
+  /** AbortController 的 signal，用于中断请求 */
+  signal?: AbortSignal
   onDelta: (delta: string) => void
   /** 首条 meta 事件回调（模型名、后端生成或沿用的会话 id） */
   onMeta?: (meta: { model?: string; conversationId?: string }) => void
+  /** 完成事件回调（携带消息 ID，用于反馈） */
+  onDone?: (data: { messageId?: number }) => void
 }
 
 /**
@@ -56,7 +63,7 @@ export async function streamChat(
   history: ChatMessage[],
   options: StreamChatOptions,
 ): Promise<void> {
-  const { conversationId, onDelta, onMeta } = options
+  const { conversationId, signal, onDelta, onMeta, onDone } = options
   const token = getToken()
   const resp = await fetch('/api/chat/stream', {
     method: 'POST',
@@ -69,6 +76,7 @@ export async function streamChat(
       history,
       ...(conversationId ? { conversation_id: conversationId } : {}),
     }),
+    signal,
   })
 
   if (resp.status === 401) {
@@ -116,12 +124,39 @@ export async function streamChat(
         error?: string
         model?: string
         conversation_id?: string
+        done?: boolean
+        message_id?: number
       }
       if (parsed.error) throw new Error(parsed.error)
       if (parsed.model || parsed.conversation_id) {
         onMeta?.({ model: parsed.model, conversationId: parsed.conversation_id })
       }
+      if (parsed.done) {
+        onDone?.({ messageId: parsed.message_id })
+      }
       if (parsed.delta) onDelta(parsed.delta)
     }
   }
+}
+
+/** 提交消息反馈：rating=1 表示踩，rating=2 表示赞。 */
+export function submitFeedback(messageId: number, rating: number): Promise<void> {
+  return requestJson(`/api/messages/${messageId}/feedback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rating }),
+  }).then(() => undefined)
+}
+
+/** 会话的 token 用量统计。 */
+export interface ConversationUsage {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  call_count: number
+}
+
+/** 获取指定会话的 token 用量。 */
+export function fetchConversationUsage(conversationId: string): Promise<ConversationUsage> {
+  return requestJson<ConversationUsage>(`/api/conversations/${conversationId}/usage`)
 }

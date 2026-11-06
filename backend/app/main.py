@@ -16,7 +16,9 @@ from .api import (
     auth_router,
     chat_router,
     conversations_router,
+    feedback_router,
     health_router,
+    usage_router,
 )
 
 # 加载 backend/.env（LLM_API_KEY、DATABASE_URL 等配置）
@@ -44,4 +46,6 @@ app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(conversations_router)
+app.include_router(feedback_router)
+app.include_router(usage_router)
 app.include_router(admin_router)

@@ -53,6 +53,8 @@ class Message(Base):
     question: Mapped[str] = mapped_column(Text)
     answer: Mapped[str | None] = mapped_column(Text, nullable=True)
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # 用户反馈：1=踩, 2=赞；NULL 表示未评价
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
 
 

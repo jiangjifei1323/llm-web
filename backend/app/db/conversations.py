@@ -72,6 +72,41 @@ def save_chat_round(
         session.commit()
 
 
+def save_chat_round_with_id(
+    conversation_id: str,
+    question: str,
+    answer: str,
+    model: str | None = None,
+    user_id: int | None = None,
+) -> int | None:
+    """落库一轮问答并返回消息 ID（用于反馈）。"""
+    with SessionLocal() as session:
+        conv = session.get(Conversation, conversation_id)
+        if conv is None:
+            session.add(
+                Conversation(
+                    id=conversation_id,
+                    user_id=user_id,
+                    title=_title_from_question(question),
+                )
+            )
+        else:
+            if conv.deleted_at is not None:
+                conv.deleted_at = None
+            if conv.title is None:
+                conv.title = _title_from_question(question)
+        msg = Message(
+            conversation_id=conversation_id,
+            question=question,
+            answer=answer,
+            model=model,
+        )
+        session.add(msg)
+        session.commit()
+        session.refresh(msg)
+        return msg.id
+
+
 def log_llm_call(
     conversation_id: str | None,
     user_id: int | None,
@@ -130,9 +165,10 @@ def delete_conversation(conversation_id: str) -> bool:
         return True
 
 
-def load_conversation_messages(conversation_id: str) -> list[dict[str, str]]:
+def load_conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
     """按时间顺序取会话内的问答，展开为 role/content 序列（供补历史时使用）。
 
+    返回每条消息的 id 和 rating（用于反馈）。
     会话已软删除时不产出任何消息。
     """
     with SessionLocal() as session:
@@ -145,23 +181,32 @@ def load_conversation_messages(conversation_id: str) -> list[dict[str, str]]:
             )
             .order_by(Message.id)
         ).all()
-    result: list[dict[str, str]] = []
+    result: list[dict[str, Any]] = []
     for r in rows:
         result.append({"role": "user", "content": r.question})
         if r.answer is not None:
-            result.append({"role": "assistant", "content": r.answer})
+            result.append({
+                "role": "assistant",
+                "content": r.answer,
+                "id": r.id,
+                "rating": r.rating,
+            })
     return result
 
 
-def list_user_conversations(user_id: int) -> list[dict[str, Any]]:
-    """当前用户的会话摘要（只含未删除的）：名称取 conversations.title，按最近一次问答时间倒序。"""
+def list_user_conversations(user_id: int, keyword: str = "") -> list[dict[str, Any]]:
+    """当前用户的会话摘要（只含未删除的）：名称取 conversations.title，按最近一次问答时间倒序。
+
+    支持按标题关键词搜索（keyword 非空时过滤）。
+    """
     with SessionLocal() as session:
-        convs = session.scalars(
-            select(Conversation).where(
-                Conversation.user_id == user_id,
-                Conversation.deleted_at.is_(None),
-            )
-        ).all()
+        stmt = select(Conversation).where(
+            Conversation.user_id == user_id,
+            Conversation.deleted_at.is_(None),
+        )
+        if keyword.strip():
+            stmt = stmt.where(Conversation.title.ilike(f"%{keyword.strip()}%"))
+        convs = session.scalars(stmt).all()
         if not convs:
             return []
         stats = session.execute(
