@@ -56,19 +56,21 @@ def _safe_name(filename: str) -> str:
     return cleaned or "document"
 
 
-def _ingest_document(doc_id: int, path: Path, file_type: str) -> None:
-    """后台入库：解析 -> 切块 -> 分批向量化 -> 落块，全程更新文档状态。"""
+def _ingest_document(doc_id: int, kb_id: int, path: Path, file_type: str) -> None:
+    """后台入库：解析 -> 切块 -> 分批向量化 -> 落块，全程更新文档状态。
+
+    kb_id 由上传接口直接传入：文档可能在此期间被软删除，不能再回查文档记录。
+    """
     db.set_document_status(doc_id, "embedding")
     try:
         text = extract_text(path, file_type)
         chunks = split_chunks(text)
         if not chunks:
             raise ValueError("未能从文档中提取到可用文本")
-        doc = db.get_document(doc_id)
         vectors: list[list[float]] = []
         for i in range(0, len(chunks), _EMBED_BATCH):
             vectors.extend(embed_documents(chunks[i : i + _EMBED_BATCH]))
-        db.insert_chunks(doc_id, doc["kb_id"], chunks, vectors)
+        db.insert_chunks(doc_id, kb_id, chunks, vectors)
         db.set_document_status(doc_id, "ready", chunk_count=len(chunks))
     except Exception as exc:  # noqa: BLE001 后台任务边界：任何异常都要落到 failed 状态
         db.set_document_status(doc_id, "failed", error=str(exc)[:2000])
@@ -152,7 +154,7 @@ def upload_document(
     path = doc_dir / f"{doc_id}_{_safe_name(filename)}"
     path.write_bytes(data)
 
-    background.add_task(_ingest_document, doc_id, path, file_type)
+    background.add_task(_ingest_document, doc_id, kb_id, path, file_type)
     return DocumentOut(**db.get_document(doc_id))
 
 
@@ -169,12 +171,14 @@ def list_documents(
 def delete_document(
     kb_id: int, doc_id: int, user: User = Depends(auth.get_current_user)
 ) -> dict:
-    """删除文档：向量块级联删除，原始文件一并清理。"""
+    """软删除文档：向量块保留在库内，列表、计数与检索不再出现。"""
     _require_kb(kb_id, user)
     doc = db.get_document(doc_id)
     if doc is None or doc["kb_id"] != kb_id:
         raise HTTPException(status_code=404, detail="文档不存在")
-    db.delete_document(doc_id)
+    if not db.delete_document(doc_id):
+        raise HTTPException(status_code=404, detail="文档不存在")
+    # 原始文件只用于入库，入库完成后已删除；这里清理的是入库中断留下的残留
     for path in (_KB_DATA_DIR / str(kb_id)).glob(f"{doc_id}_*"):
         path.unlink(missing_ok=True)
     return {"id": doc_id, "deleted": True}

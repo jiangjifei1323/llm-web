@@ -1,7 +1,7 @@
 """知识库、文档与向量块的数据访问。
 
-知识库按用户隔离（软删除语义与会话一致）；文档记录入库状态，
-块行只随文档级联删除，不提供单块编辑。
+知识库与文档都是软删除（语义与会话一致）：只置删除标记，文档的向量块
+一并保留在库内，所有读取入口（列表、计数、检索）按删除标记过滤。
 """
 
 from typing import Any
@@ -45,7 +45,10 @@ def list_knowledge_bases(user_id: int, keyword: str = "") -> list[dict[str, Any]
         counts = dict(
             session.execute(
                 select(KBDocument.kb_id, func.count())
-                .where(KBDocument.kb_id.in_([kb.id for kb in kbs]))
+                .where(
+                    KBDocument.kb_id.in_([kb.id for kb in kbs]),
+                    KBDocument.deleted_at.is_(None),
+                )
                 .group_by(KBDocument.kb_id)
             ).all()
         )
@@ -116,30 +119,32 @@ def set_document_status(
 
 
 def get_document(doc_id: int) -> dict[str, Any] | None:
+    """取文档；已软删除的一律视为不存在。"""
     with SessionLocal() as session:
         doc = session.get(KBDocument, doc_id)
-        if doc is None:
+        if doc is None or doc.deleted_at is not None:
             return None
         return _doc_dict(doc)
 
 
 def list_kb_documents(kb_id: int) -> list[dict[str, Any]]:
+    """知识库的文档列表（不含已软删除的文档）。"""
     with SessionLocal() as session:
         docs = session.scalars(
             select(KBDocument)
-            .where(KBDocument.kb_id == kb_id)
+            .where(KBDocument.kb_id == kb_id, KBDocument.deleted_at.is_(None))
             .order_by(KBDocument.id.desc())
         ).all()
         return [_doc_dict(doc) for doc in docs]
 
 
 def delete_document(doc_id: int) -> bool:
-    """硬删除文档：向量块由外键 CASCADE 一并清除。返回是否删掉一行。"""
+    """软删除文档：块行保留在库内，列表与检索不再出现。返回是否新置了删除标记。"""
     with SessionLocal() as session:
         doc = session.get(KBDocument, doc_id)
-        if doc is None:
+        if doc is None or doc.deleted_at is not None:
             return False
-        session.delete(doc)
+        doc.deleted_at = _now()
         session.commit()
         return True
 
@@ -168,7 +173,7 @@ def search_chunks(
 ) -> list[dict[str, Any]]:
     """在单个知识库内做余弦距离 Top-K 检索。
 
-    只命中入库完成（status=ready）文档的块，且知识库须未被软删除。
+    只命中入库完成（status=ready）且未被软删除的文档的块，知识库亦须未被软删除。
     distance 为余弦距离（0 最相似），调用方可按 1-distance 折算相似度。
     """
     with SessionLocal() as session:
@@ -188,6 +193,7 @@ def search_chunks(
             .where(
                 KBChunk.kb_id == kb_id,
                 KBDocument.status == "ready",
+                KBDocument.deleted_at.is_(None),
                 KnowledgeBase.deleted_at.is_(None),
             )
             .order_by(distance)

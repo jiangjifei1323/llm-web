@@ -125,6 +125,9 @@ class KBDocument(Base):
     status: Mapped[str] = mapped_column(String(16), default="pending", index=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 软删除标记：与 knowledge_bases 一致，删除后文档与其向量块保留在库内，
+    # 列表、计数与检索一律按该标记过滤
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTimeSec, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
 
 

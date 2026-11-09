@@ -21,6 +21,7 @@ def init_db() -> None:
     _migrate_messages_sources()
     _migrate_llm_calls_created_at_index()
     _migrate_kb_vector_index()
+    _migrate_kb_documents_deleted_at()
     _migrate_timestamp_columns()
 
 
@@ -136,6 +137,18 @@ def _migrate_messages_table() -> None:
         conn.execute(
             text("CREATE INDEX ix_messages_conversation_id ON messages (conversation_id)")
         )
+
+
+def _migrate_kb_documents_deleted_at() -> None:
+    """新增 kb_documents.deleted_at 列（软删除标记）：存量文档取 NULL，即视为未删除。"""
+    insp = inspect(engine)
+    if "kb_documents" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("kb_documents")}
+    if "deleted_at" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE kb_documents ADD COLUMN deleted_at TIMESTAMP(0)"))
 
 
 def _migrate_timestamp_columns() -> None:
