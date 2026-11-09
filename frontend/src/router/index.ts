@@ -3,12 +3,14 @@ import { createRouter, createWebHistory } from 'vue-router'
 import { fetchMe, getToken, isAdmin } from '@/api/auth'
 import AdminView from '@/views/AdminView.vue'
 import ChatView from '@/views/ChatView.vue'
+import KbView from '@/views/KbView.vue'
 import LoginView from '@/views/LoginView.vue'
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
   routes: [
     { path: '/', name: 'chat', component: ChatView, meta: { requiresAuth: true } },
+    { path: '/kb', name: 'kb', component: KbView, meta: { requiresAuth: true } },
     { path: '/login', name: 'login', component: LoginView },
     {
       path: '/admin',

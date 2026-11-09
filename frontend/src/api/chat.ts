@@ -1,6 +1,15 @@
 import { getToken, handleUnauthorized } from './auth'
 import { requestJson } from './http'
 
+/** 本轮问答命中的参考资料（来自知识库检索） */
+export interface ChatSource {
+  content: string
+  document_id: number
+  filename: string
+  kb_id: number
+  score: number
+}
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -9,6 +18,7 @@ export interface ChatMessage {
   input_tokens?: number  // 输入 token 数（仅助手消息）
   output_tokens?: number  // 输出 token 数（仅助手消息）
   total_tokens?: number  // 总 token 数（仅助手消息）
+  sources?: ChatSource[]  // 本轮命中的参考资料（仅助手消息）
 }
 
 /** 左侧会话列表的一条摘要 */
@@ -48,11 +58,13 @@ export function deleteConversation(conversationId: string): Promise<string> {
 export interface StreamChatOptions {
   /** 会话 id，用于后端把问答落库并延续上下文；首轮可传 null */
   conversationId?: string | null
+  /** 本轮要检索的知识库 id；为空则完全不走 RAG */
+  kbIds?: number[]
   /** AbortController 的 signal，用于中断请求 */
   signal?: AbortSignal
   onDelta: (delta: string) => void
-  /** 首条 meta 事件回调（模型名、后端生成或沿用的会话 id） */
-  onMeta?: (meta: { model?: string; conversationId?: string }) => void
+  /** 首条 meta 事件回调（模型名、后端生成或沿用的会话 id、命中的参考资料） */
+  onMeta?: (meta: { model?: string; conversationId?: string; sources?: ChatSource[] }) => void
   /** 完成事件回调（携带消息 ID 和 token 用量） */
   onDone?: (data: { messageId?: number; inputTokens?: number; outputTokens?: number; totalTokens?: number }) => void
 }
@@ -66,7 +78,7 @@ export async function streamChat(
   history: ChatMessage[],
   options: StreamChatOptions,
 ): Promise<void> {
-  const { conversationId, signal, onDelta, onMeta, onDone } = options
+  const { conversationId, kbIds, signal, onDelta, onMeta, onDone } = options
   const token = getToken()
   const resp = await fetch('/api/chat/stream', {
     method: 'POST',
@@ -78,6 +90,7 @@ export async function streamChat(
       message,
       history,
       ...(conversationId ? { conversation_id: conversationId } : {}),
+      ...(kbIds && kbIds.length ? { kb_ids: kbIds } : {}),
     }),
     signal,
   })
@@ -127,6 +140,7 @@ export async function streamChat(
         error?: string
         model?: string
         conversation_id?: string
+        sources?: ChatSource[]
         done?: boolean
         message_id?: number
         input_tokens?: number
@@ -134,8 +148,12 @@ export async function streamChat(
         total_tokens?: number
       }
       if (parsed.error) throw new Error(parsed.error)
-      if (parsed.model || parsed.conversation_id) {
-        onMeta?.({ model: parsed.model, conversationId: parsed.conversation_id })
+      if (parsed.model || parsed.conversation_id || parsed.sources) {
+        onMeta?.({
+          model: parsed.model,
+          conversationId: parsed.conversation_id,
+          sources: parsed.sources,
+        })
       }
       if (parsed.done) {
         onDone?.({

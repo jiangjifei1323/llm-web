@@ -16,6 +16,7 @@ import {
   type ConversationSummary,
 } from '@/api/chat'
 import MarkdownRenderer from '@/components/MarkdownRenderer.vue'
+import { fetchKnowledgeBases, MAX_KB_PER_CHAT, type KnowledgeBase } from '@/api/kb'
 
 const router = useRouter()
 const username = ref(getUsername() ?? '')
@@ -46,6 +47,56 @@ let searchDebounceTimer: ReturnType<typeof setTimeout> | null = null
 // 会话 id：持久化在 sessionStorage，刷新页面仍可延续同一会话
 const CONVERSATION_KEY = 'llm_conversation_id'
 const conversationId = ref<string | null>(sessionStorage.getItem(CONVERSATION_KEY))
+
+// ---------- 知识库（RAG） ----------
+// 选中的库持久化在 localStorage：换会话、刷新后仍沿用同一组检索范围
+const KB_STORAGE_KEY = 'llm_kb_ids'
+const kbs = ref<KnowledgeBase[]>([])
+const kbIds = ref<number[]>(readStoredKbIds())
+
+function readStoredKbIds(): number[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(KB_STORAGE_KEY) ?? '[]')
+    return Array.isArray(raw) ? raw.filter((id): id is number => typeof id === 'number') : []
+  } catch {
+    return []
+  }
+}
+
+function storeKbIds(ids: number[]) {
+  localStorage.setItem(KB_STORAGE_KEY, JSON.stringify(ids))
+}
+
+/** 拉取可选知识库；失败不影响问答本身，只是没有库可选。 */
+async function loadKbs() {
+  try {
+    kbs.value = await fetchKnowledgeBases()
+    const valid = new Set(kbs.value.map((kb) => kb.id))
+    // 已被删除的库从选中项里剔除，避免请求携带非法 kb_ids 被后端拒绝
+    const kept = kbIds.value.filter((id) => valid.has(id))
+    if (kept.length !== kbIds.value.length) {
+      kbIds.value = kept
+      storeKbIds(kept)
+    }
+  } catch {
+    /* 知识库列表加载失败时保持原样，问答可正常进行 */
+  }
+}
+
+function onKbChange(ids: number[]) {
+  storeKbIds(ids)
+}
+
+function goKb() {
+  userMenuOpen.value = false
+  void router.push({ name: 'kb' })
+}
+
+/** 参考资料正文较长，列表中先截断展示。 */
+function excerpt(text: string, max = 160): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat
+}
 
 function errText(err: unknown): string {
   return err instanceof Error ? err.message : '未知错误'
@@ -239,6 +290,7 @@ onMounted(async () => {
     /* 令牌失效时 fetchMe 已跳转登录页，这里不阻断会话列表加载 */
   }
   await loadConversations()
+  void loadKbs()
   // 刷新前正在进行的会话，重新拉取历史以还原界面
   if (conversationId.value) await loadHistory(conversationId.value)
 })
@@ -266,11 +318,17 @@ async function submit() {
     const history = messages.value.slice(0, -2)
     await streamChat(question, history, {
       conversationId: conversationId.value,
+      kbIds: kbIds.value,
       signal: abortController.value.signal,
       onMeta: (meta) => {
         if (meta.conversationId) {
           conversationId.value = meta.conversationId
           sessionStorage.setItem(CONVERSATION_KEY, meta.conversationId)
+        }
+        // 首帧带回落库前的参考资料，直接挂到本轮回复上
+        if (meta.sources && meta.sources.length) {
+          const reply = messages.value[replyIndex]
+          if (reply) reply.sources = meta.sources
         }
       },
       onDelta: (delta) => {
@@ -483,6 +541,24 @@ function onKeydown(e: KeyboardEvent) {
             <template v-else>
               {{ msg.content || (loading && index === messages.length - 1 ? '思考中…' : '') }}
             </template>
+
+            <!-- 知识库命中的参考资料：文件名 + 相关度 + 正文摘要 -->
+            <details v-if="msg.sources && msg.sources.length" class="sources">
+              <summary>
+                <span class="sources-label">参考资料 {{ msg.sources.length }} 条</span>
+                <span class="sources-hint">回答依据的知识库片段</span>
+              </summary>
+              <ol class="sources-list">
+                <li v-for="(src, si) in msg.sources" :key="si" class="source-item">
+                  <div class="source-head">
+                    <span class="source-index">[{{ si + 1 }}]</span>
+                    <span class="source-name" :title="src.filename">{{ src.filename }}</span>
+                    <span class="source-score">相关度 {{ Math.round(src.score * 100) }}%</span>
+                  </div>
+                  <p class="source-content" :title="src.content">{{ excerpt(src.content) }}</p>
+                </li>
+              </ol>
+            </details>
           </div>
         </div>
       </div>
@@ -490,30 +566,57 @@ function onKeydown(e: KeyboardEvent) {
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
       <footer class="chat-input-bar">
-        <textarea
-          v-model="input"
-          class="chat-input"
-          placeholder="请输入问题，Enter 发送，Shift+Enter 换行"
-          rows="3"
-          @keydown="onKeydown"
-        ></textarea>
-        <el-button
-          v-if="loading"
-          type="danger"
-          class="send-btn"
-          @click="stopGeneration"
-        >
-          停止
-        </el-button>
-        <el-button
-          v-else
-          type="primary"
-          class="send-btn"
-          :disabled="!input.trim()"
-          @click="submit"
-        >
-          发送
-        </el-button>
+        <div class="kb-bar">
+          <span class="kb-bar-label">知识库</span>
+          <el-select
+            v-model="kbIds"
+            class="kb-select"
+            size="small"
+            multiple
+            clearable
+            collapse-tags
+            collapse-tags-tooltip
+            :multiple-limit="MAX_KB_PER_CHAT"
+            placeholder="不引用（仅模型自身知识作答）"
+            @change="onKbChange"
+          >
+            <el-option v-for="kb in kbs" :key="kb.id" :label="kb.name" :value="kb.id">
+              <span class="kb-option-name">{{ kb.name }}</span>
+              <span class="kb-option-count">{{ kb.doc_count }} 文档</span>
+            </el-option>
+            <template v-if="kbs.length === 0" #empty>
+              <p class="kb-option-empty">还没有知识库</p>
+            </template>
+          </el-select>
+          <el-button link type="primary" size="small" @click="goKb">管理</el-button>
+        </div>
+
+        <div class="input-row">
+          <textarea
+            v-model="input"
+            class="chat-input"
+            placeholder="请输入问题，Enter 发送，Shift+Enter 换行"
+            rows="3"
+            @keydown="onKeydown"
+          ></textarea>
+          <el-button
+            v-if="loading"
+            type="danger"
+            class="send-btn"
+            @click="stopGeneration"
+          >
+            停止
+          </el-button>
+          <el-button
+            v-else
+            type="primary"
+            class="send-btn"
+            :disabled="!input.trim()"
+            @click="submit"
+          >
+            发送
+          </el-button>
+        </div>
       </footer>
     </div>
 
@@ -851,10 +954,128 @@ function onKeydown(e: KeyboardEvent) {
 
 .chat-input-bar {
   display: flex;
-  gap: 10px;
-  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
   padding-top: 8px;
   border-top: 1px solid #e5e5e5;
+}
+
+.input-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-end;
+}
+
+/* 知识库选择条 */
+.kb-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kb-bar-label {
+  flex-shrink: 0;
+  color: #888;
+  font-size: 12px;
+}
+
+.kb-select {
+  width: 300px;
+}
+
+.kb-option-name {
+  float: left;
+}
+
+.kb-option-count {
+  float: right;
+  margin-left: 16px;
+  color: #aaa;
+  font-size: 12px;
+}
+
+.kb-option-empty {
+  margin: 0;
+  padding: 6px 0;
+  color: #aaa;
+  font-size: 13px;
+  text-align: center;
+}
+
+/* 参考资料折叠区 */
+.sources {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border: 1px solid #e0e3e6;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 12px;
+}
+
+.sources summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  color: #1a7f37;
+  list-style: none;
+}
+
+.sources summary::-webkit-details-marker {
+  display: none;
+}
+
+.sources-label {
+  font-weight: 600;
+}
+
+.sources-hint {
+  color: #aaa;
+  font-size: 11px;
+}
+
+.sources-list {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.source-item {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed #e6e6e6;
+}
+
+.source-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.source-index {
+  color: #1a7f37;
+  font-weight: 600;
+}
+
+.source-name {
+  overflow: hidden;
+  color: #555;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.source-score {
+  flex-shrink: 0;
+  margin-left: auto;
+  color: #999;
+  font-size: 11px;
+}
+
+.source-content {
+  margin: 2px 0 0;
+  color: #777;
+  line-height: 1.5;
 }
 
 /* 左下角用户入口 */
