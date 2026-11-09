@@ -1,6 +1,7 @@
 """问答接口：非流式与 SSE 流式各一个。
 
 基于 LangChain 调用模型，并把每次调用的输入(messages)、输出与 token 用量落库到 llm_calls。
+请求携带 kb_ids 时先做 RAG 检索，把命中的参考资料注入 system 提示词，并随响应返回 sources。
 """
 
 import json
@@ -13,25 +14,48 @@ from fastapi.responses import StreamingResponse
 from .. import auth, db
 from ..db import User
 from ..llm import TokenUsage, chat_completion, chat_completion_stream, get_model_name
+from ..rag import retrieve
 from ..schemas.chat import ChatMessage, ChatRequest, ChatResponse
-from .deps import check_conversation_access
+from .deps import check_conversation_access, check_kb_access
 
 router = APIRouter(prefix="/api/chat", tags=["问答"])
 
 # 流式回答的进度落库最小间隔（秒）：客户端断开时最多丢失这个窗口内的内容
 _PROGRESS_FLUSH_SECONDS = 2.0
 
+_SYSTEM_BASE = "你是一名乐于助人的问答助手，请用简体中文回答问题。"
+
 
 def _resolve_conversation_id(req: ChatRequest) -> str:
     return req.conversation_id or db.new_conversation_id()
 
 
-def _build_messages(req: ChatRequest, conversation_id: str) -> list[dict[str, str]]:
-    """组装 system 指令 + 历史对话 + 当前问题。
+def _retrieve_sources(req: ChatRequest, user: User) -> list[dict]:
+    """按请求携带的知识库检索参考资料；未选库时返回空列表。"""
+    kb_ids = check_kb_access(req.kb_ids, user)
+    return retrieve(req.message, kb_ids)
+
+
+def _build_messages(
+    req: ChatRequest, conversation_id: str, sources: list[dict] | None = None
+) -> list[dict[str, str]]:
+    """组装 system 指令 + 参考资料 + 历史对话 + 当前问题。
 
     前端没带 history 但带了已存在的 conversation_id 时，从数据库补历史。
     """
-    messages = [{"role": "system", "content": "你是一名乐于助人的问答助手，请用简体中文回答问题。"}]
+    system = _SYSTEM_BASE
+    if sources:
+        refs = "\n".join(
+            f"[{i + 1}]（{s['filename']}）{s['content']}"
+            for i, s in enumerate(sources)
+        )
+        system = (
+            f"{_SYSTEM_BASE}\n"
+            "请优先依据以下参考资料回答问题，并在答案中标注来源编号（如 [1]）；"
+            "若参考资料与问题无关，请基于你自己的知识回答并说明知识库中没有相关内容。\n\n"
+            f"[参考资料]\n{refs}"
+        )
+    messages = [{"role": "system", "content": system}]
     history = [m.model_dump() for m in req.history]
     if not history and req.conversation_id:
         history = db.load_conversation_messages(conversation_id)[-40:]
@@ -49,7 +73,8 @@ def _sse(payload: dict) -> str:
 def chat(req: ChatRequest, user: User = Depends(auth.get_current_user)) -> ChatResponse:
     conversation_id = _resolve_conversation_id(req)
     check_conversation_access(conversation_id, user)
-    messages = _build_messages(req, conversation_id)
+    sources = _retrieve_sources(req, user)
+    messages = _build_messages(req, conversation_id, sources)
 
     try:
         result = chat_completion(messages)
@@ -66,13 +91,19 @@ def chat(req: ChatRequest, user: User = Depends(auth.get_current_user)) -> ChatR
         input_tokens=result.usage.input_tokens,
         output_tokens=result.usage.output_tokens,
         total_tokens=result.usage.total_tokens,
+        sources=sources,
     )
     db.log_llm_call(
         conversation_id, user.id, result.model, messages, result.answer,
         result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens,
         result.latency_ms, success=True,
     )
-    return ChatResponse(answer=result.answer, model=result.model, conversation_id=conversation_id)
+    return ChatResponse(
+        answer=result.answer,
+        model=result.model,
+        conversation_id=conversation_id,
+        sources=sources,
+    )
 
 
 @router.post("/stream")
@@ -84,17 +115,24 @@ def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -
     """
     conversation_id = _resolve_conversation_id(req)
     check_conversation_access(conversation_id, user)
-    messages = _build_messages(req, conversation_id)
+    sources = _retrieve_sources(req, user)
+    messages = _build_messages(req, conversation_id, sources)
 
     def event_gen() -> Iterator[str]:
-        # 首条消息携带模型名与会话 id，供前端展示/延续会话
-        yield _sse({"delta": "", "model": get_model_name(), "conversation_id": conversation_id})
+        # 首条消息携带模型名、会话 id 与命中的参考资料，供前端展示/延续会话
+        yield _sse({
+            "delta": "",
+            "model": get_model_name(),
+            "conversation_id": conversation_id,
+            "sources": sources,
+        })
 
         # 流开始即建行：用户问题先落库，回答随生成增量刷新。
         # uvicorn/Starlette 下客户端断开时同步生成器被直接丢弃（收不到
         # GeneratorExit），只有“边生成边落库”才能保证中断的问答不丢。
         message_id = db.save_chat_round_with_id(
-            conversation_id, req.message, None, get_model_name(), user_id=user.id
+            conversation_id, req.message, None, get_model_name(),
+            user_id=user.id, sources=sources,
         )
         parts: list[str] = []
         result_out: dict = {}

@@ -34,6 +34,24 @@ def _title_from_question(question: str) -> str | None:
     return trimmed or None
 
 
+def _dump_sources(sources: list[dict[str, Any]] | None) -> str | None:
+    """参考资料序列化为 JSON 文本；None（未启用 RAG）保持 NULL。"""
+    if sources is None:
+        return None
+    return json.dumps(sources, ensure_ascii=False)
+
+
+def _load_sources(raw: str | None) -> list[dict[str, Any]]:
+    """反序列化 messages.sources；NULL 或脏数据返回空列表。"""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
+
+
 def save_chat_round(
     conversation_id: str,
     question: str,
@@ -43,11 +61,13 @@ def save_chat_round(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     total_tokens: int | None = None,
+    sources: list[dict[str, Any]] | None = None,
 ) -> None:
     """落库一轮问答（单行 question/answer）：会话不存在则先创建。
 
     会话名称只在首个问题写入；用户改过名（title 非空）则保持不变。
     命中已软删除的会话时撤销删除标记（复活该会话并继续累积问答）。
+    sources 为本轮 RAG 命中的参考资料，None 表示未启用 RAG。
     """
     with SessionLocal() as session:
         conv = session.get(Conversation, conversation_id)
@@ -73,6 +93,7 @@ def save_chat_round(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
                 total_tokens=total_tokens,
+                sources=_dump_sources(sources),
             )
         )
         session.commit()
@@ -87,6 +108,7 @@ def save_chat_round_with_id(
     input_tokens: int | None = None,
     output_tokens: int | None = None,
     total_tokens: int | None = None,
+    sources: list[dict[str, Any]] | None = None,
 ) -> int | None:
     """落库一轮问答并返回消息 ID（用于反馈）。
 
@@ -116,6 +138,7 @@ def save_chat_round_with_id(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
+            sources=_dump_sources(sources),
         )
         session.add(msg)
         session.commit()
@@ -213,7 +236,7 @@ def delete_conversation(conversation_id: str) -> bool:
 def load_conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
     """按时间顺序取会话内的问答，展开为 role/content 序列（供补历史时使用）。
 
-    返回每条消息的 id、rating（用于反馈）与 token 用量。
+    返回每条消息的 id、rating（用于反馈）、token 用量与本轮命中的参考资料。
     会话已软删除时不产出任何消息。
     """
     with SessionLocal() as session:
@@ -240,6 +263,7 @@ def load_conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
                     "input_tokens": r.input_tokens,
                     "output_tokens": r.output_tokens,
                     "total_tokens": r.total_tokens,
+                    "sources": _load_sources(r.sources),
                 }
             )
     return result

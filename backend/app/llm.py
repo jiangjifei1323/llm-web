@@ -217,11 +217,17 @@ def chat_completion_stream(
 
 
 def _build_embeddings() -> OpenAIEmbeddings:
-    """根据环境变量构造 OpenAIEmbeddings 实例。"""
+    """根据环境变量构造 OpenAIEmbeddings 实例。
+
+    check_embedding_ctx_length=False：直接用原文调用 /embeddings。DashScope
+    兼容端点只接受字符串数组，而 langchain 默认的 tiktoken 切分会发送 token
+    数组导致 400。
+    """
     return OpenAIEmbeddings(
         api_key=os.getenv("EMBEDDING_API_KEY", "").strip(),
         base_url=os.getenv("EMBEDDING_BASE_URL", "").strip(),
         model=os.getenv("EMBEDDING_MODEL", "text-embedding-v3"),
+        check_embedding_ctx_length=False,
     )
 
 

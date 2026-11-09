@@ -16,3 +16,15 @@ def check_conversation_access(conversation_id: str, user: User) -> None:
         return
     if conv.user_id != user.id and not user.is_admin:
         raise HTTPException(status_code=403, detail="无权访问该会话")
+
+
+def check_kb_access(kb_ids: list[int], user: User) -> list[int]:
+    """校验知识库归属并去重：不存在 404，他人库 403（管理员放行）。"""
+    ids = sorted(set(kb_ids))
+    for kb_id in ids:
+        kb = db.get_knowledge_base(kb_id)
+        if kb is None:
+            raise HTTPException(status_code=404, detail="知识库不存在")
+        if kb.user_id != user.id and not user.is_admin:
+            raise HTTPException(status_code=403, detail="无权访问该知识库")
+    return ids

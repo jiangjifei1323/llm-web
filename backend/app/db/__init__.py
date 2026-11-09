@@ -17,9 +17,33 @@ from .conversations import (
     save_chat_round_with_id,
     update_message_answer,
 )
+from .knowledge import (
+    add_document,
+    create_knowledge_base,
+    delete_document,
+    delete_knowledge_base,
+    get_document,
+    get_knowledge_base,
+    insert_chunks,
+    list_kb_documents,
+    list_knowledge_bases,
+    rename_knowledge_base,
+    search_chunks,
+    set_document_status,
+)
 from .messages import get_message_rating, set_message_rating
 from .migrations import init_db
-from .models import TITLE_MAX_LEN, Conversation, LLMCall, Message, User
+from .models import (
+    EMBEDDING_DIM,
+    TITLE_MAX_LEN,
+    Conversation,
+    KBChunk,
+    KBDocument,
+    KnowledgeBase,
+    LLMCall,
+    Message,
+    User,
+)
 from .users import (
     count_admins,
     create_user,
@@ -67,4 +91,20 @@ __all__ = [
     "new_conversation_id",
     "set_message_rating",
     "get_message_rating",
+    "EMBEDDING_DIM",
+    "KnowledgeBase",
+    "KBDocument",
+    "KBChunk",
+    "create_knowledge_base",
+    "get_knowledge_base",
+    "list_knowledge_bases",
+    "rename_knowledge_base",
+    "delete_knowledge_base",
+    "add_document",
+    "set_document_status",
+    "get_document",
+    "list_kb_documents",
+    "delete_document",
+    "insert_chunks",
+    "search_chunks",
 ]

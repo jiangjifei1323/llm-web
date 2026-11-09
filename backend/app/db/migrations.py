@@ -8,6 +8,7 @@ from .models import TITLE_MAX_LEN, Base
 
 def init_db() -> None:
     """开发阶段直接建表；后续表结构变更可引入 Alembic 迁移。"""
+    _ensure_vector_extension()  # 必须先于 create_all：kb_chunks 的列类型依赖 vector
     Base.metadata.create_all(engine)
     _migrate_legacy_tables()
     _migrate_messages_table()
@@ -17,8 +18,16 @@ def init_db() -> None:
     _migrate_users_deleted_at()
     _migrate_messages_rating()
     _migrate_messages_tokens()
+    _migrate_messages_sources()
     _migrate_llm_calls_created_at_index()
+    _migrate_kb_vector_index()
     _migrate_timestamp_columns()
+
+
+def _ensure_vector_extension() -> None:
+    """启用 pgvector 扩展：知识库向量列（vector 类型）依赖它。"""
+    with engine.begin() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
 
 
 def _migrate_legacy_tables() -> None:
@@ -206,6 +215,18 @@ def _migrate_messages_tokens() -> None:
         )
 
 
+def _migrate_messages_sources() -> None:
+    """新增 messages.sources 列：存本轮命中的参考资料 JSON，历史会话据此回显。"""
+    insp = inspect(engine)
+    if "messages" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("messages")}
+    if "sources" in columns:
+        return
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE messages ADD COLUMN sources TEXT"))
+
+
 def _migrate_llm_calls_created_at_index() -> None:
     """为 llm_calls.created_at 建索引：统计接口全部按该列过滤与分组。"""
     insp = inspect(engine)
@@ -214,4 +235,21 @@ def _migrate_llm_calls_created_at_index() -> None:
     with engine.begin() as conn:
         conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_llm_calls_created_at ON llm_calls (created_at)")
+        )
+
+
+def _migrate_kb_vector_index() -> None:
+    """为 kb_chunks.embedding 建 HNSW 余弦索引：向量检索只走相似度排序。
+
+    create_all 无法表达 USING hnsw 的索引类型，这里幂等补齐。
+    """
+    insp = inspect(engine)
+    if "kb_chunks" not in insp.get_table_names():
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_kb_chunks_embedding "
+                "ON kb_chunks USING hnsw (embedding vector_cosine_ops)"
+            )
         )
