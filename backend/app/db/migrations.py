@@ -16,6 +16,8 @@ def init_db() -> None:
     _migrate_conversations_deleted_at()
     _migrate_users_deleted_at()
     _migrate_messages_rating()
+    _migrate_messages_tokens()
+    _migrate_llm_calls_created_at_index()
     _migrate_timestamp_columns()
 
 
@@ -165,3 +167,51 @@ def _migrate_messages_rating() -> None:
         return
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE messages ADD COLUMN rating INTEGER"))
+
+
+def _migrate_messages_tokens() -> None:
+    """新增 messages 的 token 冗余列，并用 llm_calls 回填历史消息的用量。
+
+    历史消息此前靠读接口按 answer 文本反查 llm_calls，这里一次性回填，
+    避免列上线后旧会话的用量显示消失。
+    """
+    insp = inspect(engine)
+    if "messages" not in insp.get_table_names():
+        return
+    columns = {c["name"] for c in insp.get_columns("messages")}
+    missing = [c for c in ("input_tokens", "output_tokens", "total_tokens") if c not in columns]
+    if not missing:
+        return
+    with engine.begin() as conn:
+        for column in missing:
+            conn.execute(text(f"ALTER TABLE messages ADD COLUMN {column} INTEGER"))
+        if "llm_calls" not in insp.get_table_names():
+            return
+        conn.execute(
+            text(
+                "UPDATE messages m "
+                "SET input_tokens = c.input_tokens, "
+                "    output_tokens = c.output_tokens, "
+                "    total_tokens = c.total_tokens "
+                "FROM ( "
+                "  SELECT DISTINCT ON (conversation_id, output) "
+                "    conversation_id, output, input_tokens, output_tokens, total_tokens "
+                "  FROM llm_calls "
+                "  WHERE success AND output IS NOT NULL "
+                "  ORDER BY conversation_id, output, id DESC "
+                ") c "
+                "WHERE c.conversation_id = m.conversation_id AND c.output = m.answer "
+                "AND m.total_tokens IS NULL"
+            )
+        )
+
+
+def _migrate_llm_calls_created_at_index() -> None:
+    """为 llm_calls.created_at 建索引：统计接口全部按该列过滤与分组。"""
+    insp = inspect(engine)
+    if "llm_calls" not in insp.get_table_names():
+        return
+    with engine.begin() as conn:
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_llm_calls_created_at ON llm_calls (created_at)")
+        )

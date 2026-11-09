@@ -15,6 +15,7 @@ from .conversations import (
     rename_conversation,
     save_chat_round,
     save_chat_round_with_id,
+    update_message_answer,
 )
 from .messages import get_message_rating, set_message_rating
 from .migrations import init_db
@@ -57,6 +58,7 @@ __all__ = [
     "claim_conversation",
     "save_chat_round",
     "save_chat_round_with_id",
+    "update_message_answer",
     "log_llm_call",
     "rename_conversation",
     "delete_conversation",

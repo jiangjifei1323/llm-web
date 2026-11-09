@@ -55,6 +55,10 @@ class Message(Base):
     model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # 用户反馈：1=踩, 2=赞；NULL 表示未评价
     rating: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 本轮问答的 token 用量冗余（来自 llm_calls），NULL 表示尚未记录（如中断的轮次）
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
 
 
@@ -77,4 +81,5 @@ class LLMCall(Base):
     total_tokens: Mapped[int] = mapped_column(Integer, default=0)
     latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     success: Mapped[bool] = mapped_column(Boolean, default=True)
-    created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
+    # 统计接口全部按 created_at 过滤/分组，必须有索引
+    created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now, index=True)

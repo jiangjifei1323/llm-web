@@ -4,6 +4,7 @@
 """
 
 import json
+import time
 from collections.abc import Iterator
 
 from fastapi import APIRouter, Depends
@@ -16,6 +17,9 @@ from ..schemas.chat import ChatMessage, ChatRequest, ChatResponse
 from .deps import check_conversation_access
 
 router = APIRouter(prefix="/api/chat", tags=["问答"])
+
+# 流式回答的进度落库最小间隔（秒）：客户端断开时最多丢失这个窗口内的内容
+_PROGRESS_FLUSH_SECONDS = 2.0
 
 
 def _resolve_conversation_id(req: ChatRequest) -> str:
@@ -57,7 +61,12 @@ def chat(req: ChatRequest, user: User = Depends(auth.get_current_user)) -> ChatR
         )
         raise
 
-    db.save_chat_round(conversation_id, req.message, result.answer, result.model, user_id=user.id)
+    db.save_chat_round(
+        conversation_id, req.message, result.answer, result.model, user_id=user.id,
+        input_tokens=result.usage.input_tokens,
+        output_tokens=result.usage.output_tokens,
+        total_tokens=result.usage.total_tokens,
+    )
     db.log_llm_call(
         conversation_id, user.id, result.model, messages, result.answer,
         result.usage.input_tokens, result.usage.output_tokens, result.usage.total_tokens,
@@ -70,7 +79,8 @@ def chat(req: ChatRequest, user: User = Depends(auth.get_current_user)) -> ChatR
 def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -> StreamingResponse:
     """SSE 流式问答：逐块推送 data: {"delta": ...}，结束推送 [DONE]。
 
-    完整回答累积后与用户提问一起落库，并把本次调用的输入/输出/token 记入 llm_calls。
+    用户问题在流开始时先落库，回答边生成边增量落库（≤2 秒窗口），
+    客户端中断也不会丢失本轮问答；正常结束时补全 token 用量并记入 llm_calls。
     """
     conversation_id = _resolve_conversation_id(req)
     check_conversation_access(conversation_id, user)
@@ -79,24 +89,51 @@ def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -
     def event_gen() -> Iterator[str]:
         # 首条消息携带模型名与会话 id，供前端展示/延续会话
         yield _sse({"delta": "", "model": get_model_name(), "conversation_id": conversation_id})
+
+        # 流开始即建行：用户问题先落库，回答随生成增量刷新。
+        # uvicorn/Starlette 下客户端断开时同步生成器被直接丢弃（收不到
+        # GeneratorExit），只有“边生成边落库”才能保证中断的问答不丢。
+        message_id = db.save_chat_round_with_id(
+            conversation_id, req.message, None, get_model_name(), user_id=user.id
+        )
+        parts: list[str] = []
         result_out: dict = {}
+        last_flush = time.monotonic()
+
+        def flush(final: bool = False) -> None:
+            """把已生成的部分写回消息行；final=True 时补全模型与 token 冗余列。"""
+            nonlocal last_flush
+            if message_id is None or not parts:
+                return
+            answer = "".join(parts)
+            if final:
+                usage: TokenUsage = result_out.get("usage", TokenUsage())
+                db.update_message_answer(
+                    message_id, answer,
+                    model=result_out.get("model", get_model_name()),
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    total_tokens=usage.total_tokens,
+                )
+            else:
+                db.update_message_answer(message_id, answer)
+            last_flush = time.monotonic()
+
         try:
             for delta in chat_completion_stream(messages, result_out):
+                parts.append(delta)
                 yield _sse({"delta": delta})
-
-            answer = result_out.get("answer", "")
-            model = result_out.get("model", get_model_name())
-            usage: TokenUsage = result_out.get("usage", TokenUsage())
-            latency_ms = result_out.get("latency_ms")
-
-            # 保存问答并获取消息 ID
-            message_id = db.save_chat_round_with_id(
-                conversation_id, req.message, answer, model, user_id=user.id
-            )
+                if time.monotonic() - last_flush >= _PROGRESS_FLUSH_SECONDS:
+                    flush()
+            # 流正常结束：写入完整回答与 token 用量
+            flush(final=True)
+            answer = "".join(parts)
+            usage = result_out.get("usage", TokenUsage())
             db.log_llm_call(
-                conversation_id, user.id, model, messages, answer,
+                conversation_id, user.id, result_out.get("model", get_model_name()),
+                messages, answer,
                 usage.input_tokens, usage.output_tokens, usage.total_tokens,
-                latency_ms, success=True,
+                result_out.get("latency_ms"), success=True,
             )
             # 携带消息 ID 和 token 用量的结束事件
             yield _sse({
@@ -107,11 +144,16 @@ def chat_stream(req: ChatRequest, user: User = Depends(auth.get_current_user)) -
                 "total_tokens": usage.total_tokens,
             })
             yield "data: [DONE]\n\n"
+        except GeneratorExit:
+            # 少数 ASGI 栈会把断开传递到生成器：补一次落盘后原样结束
+            flush()
+            raise
         except RuntimeError as exc:
             # 流已开始、无法再改状态码，故以 error 事件下发；同时记录失败的调用
+            flush()
             db.log_llm_call(
-                conversation_id, user.id, get_model_name(), messages, None,
-                0, 0, 0, None, success=False,
+                conversation_id, user.id, get_model_name(), messages, "".join(parts) or None,
+                0, 0, 0, result_out.get("latency_ms"), success=False,
             )
             yield _sse({"error": str(exc)})
 

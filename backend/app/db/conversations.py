@@ -40,6 +40,9 @@ def save_chat_round(
     answer: str,
     model: str | None = None,
     user_id: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> None:
     """落库一轮问答（单行 question/answer）：会话不存在则先创建。
 
@@ -67,6 +70,9 @@ def save_chat_round(
                 question=question,
                 answer=answer,
                 model=model,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                total_tokens=total_tokens,
             )
         )
         session.commit()
@@ -75,11 +81,18 @@ def save_chat_round(
 def save_chat_round_with_id(
     conversation_id: str,
     question: str,
-    answer: str,
+    answer: str | None = None,
     model: str | None = None,
     user_id: int | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    total_tokens: int | None = None,
 ) -> int | None:
-    """落库一轮问答并返回消息 ID（用于反馈）。"""
+    """落库一轮问答并返回消息 ID（用于反馈）。
+
+    流式场景 answer 可传 None：先建行保存用户问题，回答由
+    update_message_answer() 增量写入。
+    """
     with SessionLocal() as session:
         conv = session.get(Conversation, conversation_id)
         if conv is None:
@@ -100,11 +113,43 @@ def save_chat_round_with_id(
             question=question,
             answer=answer,
             model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
         )
         session.add(msg)
         session.commit()
         session.refresh(msg)
         return msg.id
+
+
+def update_message_answer(
+    message_id: int,
+    answer: str,
+    model: str | None = None,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    total_tokens: int | None = None,
+) -> None:
+    """覆盖写入消息的回答；可选补充模型与 token 冗余列。
+
+    流式生成期间做进度落盘，客户端断开导致服务端任务被取消时，
+    最近一次落盘的部分回答不会丢失。
+    """
+    with SessionLocal() as session:
+        msg = session.get(Message, message_id)
+        if msg is None:
+            return
+        msg.answer = answer
+        if model is not None:
+            msg.model = model
+        if input_tokens is not None:
+            msg.input_tokens = input_tokens
+        if output_tokens is not None:
+            msg.output_tokens = output_tokens
+        if total_tokens is not None:
+            msg.total_tokens = total_tokens
+        session.commit()
 
 
 def log_llm_call(
@@ -168,7 +213,7 @@ def delete_conversation(conversation_id: str) -> bool:
 def load_conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
     """按时间顺序取会话内的问答，展开为 role/content 序列（供补历史时使用）。
 
-    返回每条消息的 id 和 rating（用于反馈）。
+    返回每条消息的 id、rating（用于反馈）与 token 用量。
     会话已软删除时不产出任何消息。
     """
     with SessionLocal() as session:
@@ -185,26 +230,18 @@ def load_conversation_messages(conversation_id: str) -> list[dict[str, Any]]:
     for r in rows:
         result.append({"role": "user", "content": r.question})
         if r.answer is not None:
-            # 从 llm_calls 表查询该消息的 token 用量
-            with SessionLocal() as llm_session:
-                from sqlalchemy import select as sa_select
-                from .models import LLMCall
-                llm_call = llm_session.scalar(
-                    sa_select(LLMCall).where(
-                        LLMCall.conversation_id == conversation_id,
-                        LLMCall.output == r.answer,
-                        LLMCall.success.is_(True),
-                    ).order_by(LLMCall.id.desc()).limit(1)
-                )
-            result.append({
-                "role": "assistant",
-                "content": r.answer,
-                "id": r.id,
-                "rating": r.rating,
-                "input_tokens": llm_call.input_tokens if llm_call else None,
-                "output_tokens": llm_call.output_tokens if llm_call else None,
-                "total_tokens": llm_call.total_tokens if llm_call else None,
-            })
+            # token 用量取 messages 上的冗余列，不再按回答文本回查 llm_calls
+            result.append(
+                {
+                    "role": "assistant",
+                    "content": r.answer,
+                    "id": r.id,
+                    "rating": r.rating,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                    "total_tokens": r.total_tokens,
+                }
+            )
     return result
 
 

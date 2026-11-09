@@ -2,15 +2,10 @@
 
 import os
 from datetime import datetime
-from pathlib import Path
 
-from dotenv import load_dotenv
 from sqlalchemy import DateTime, create_engine, text
 from sqlalchemy.dialects.postgresql import TIMESTAMP as PG_TIMESTAMP
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
-
-# 独立导入本模块时也保证 .env 已加载（与 main.py 加载同一文件，幂等）
-load_dotenv(Path(__file__).resolve().parent.parent.parent / ".env")
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",

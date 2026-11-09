@@ -4,9 +4,7 @@
 """
 
 from contextlib import asynccontextmanager
-from pathlib import Path
 
-from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -22,12 +20,12 @@ from .api import (
     usage_router,
 )
 
-# 加载 backend/.env（LLM_API_KEY、DATABASE_URL 等配置）
-load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+# backend/.env 的加载在 app/__init__.py，确保所有模块级 os.getenv 都能读到配置
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    auth.ensure_secret_configured()  # 生产环境用弱/默认密钥时直接拒绝启动
     db.init_db()
     auth.seed_admin()  # 确保管理员账户 admin/admin 存在
     yield
