@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import type { UploadRequestOptions } from 'element-plus'
 
 import {
@@ -14,8 +13,6 @@ import {
   type KBDocument,
   type KnowledgeBase,
 } from '@/api/kb'
-
-const router = useRouter()
 
 /** 新建/重命名共用的表单态；id 为 null 表示新建。 */
 interface KbForm {
@@ -276,10 +273,6 @@ async function removeDoc(doc: KBDocument) {
   }
 }
 
-function backToChat() {
-  void router.push({ name: 'chat' })
-}
-
 onMounted(async () => {
   await loadKbs(false)
   // 默认选中第一个库，省去一次点击
@@ -291,20 +284,21 @@ onBeforeUnmount(stopPolling)
 </script>
 
 <template>
-  <div class="kb-layout">
+  <section class="panel">
     <aside class="kb-side">
       <div class="side-head">
-        <h2 class="side-title">知识库</h2>
+        <h3 class="side-title">知识库</h3>
         <el-button class="new-btn" type="primary" plain size="small" @click="openCreate">
           新建
         </el-button>
       </div>
 
-      <input
+      <el-input
         v-model="keyword"
-        class="search-input"
-        type="text"
+        size="small"
+        clearable
         placeholder="搜索知识库..."
+        class="search-input"
         @input="onSearch"
       />
 
@@ -313,7 +307,12 @@ onBeforeUnmount(stopPolling)
         {{ keyword ? '未找到匹配知识库' : '还没有知识库，点击「新建」创建' }}
       </p>
       <ul v-else class="kb-list">
-        <li v-for="kb in kbs" :key="kb.id" class="kb-row" :class="{ active: kb.id === activeKbId }">
+        <li
+          v-for="kb in kbs"
+          :key="kb.id"
+          class="kb-row"
+          :class="{ active: kb.id === activeKbId }"
+        >
           <button class="kb-item" @click="selectKb(kb)">
             <span class="kb-name">{{ kb.name }}</span>
             <span class="kb-meta">{{ kb.doc_count }} 个文档 · {{ formatTime(kb.created_at) }}</span>
@@ -331,27 +330,28 @@ onBeforeUnmount(stopPolling)
           </span>
         </li>
       </ul>
-
-      <div class="side-footer">
-        <el-button plain type="primary" size="small" @click="backToChat">返回聊天</el-button>
-      </div>
     </aside>
 
-    <main class="kb-main">
-      <header class="main-head">
-        <div>
-          <h1>{{ activeKb ? activeKb.name : '文档管理' }}</h1>
-          <p class="subtitle">
-            {{
-              activeKb?.description
-                ? activeKb.description
-                : '上传 txt / md / pdf / docx 文档，系统会自动切块并向量化'
-            }}
-          </p>
-        </div>
-      </header>
+    <div class="kb-main">
+      <div class="main-head">
+        <h3 class="panel-title">{{ activeKb ? activeKb.name : '文档管理' }}</h3>
+        <p class="panel-desc">
+          {{
+            activeKb?.description
+              ? activeKb.description
+              : '上传 txt / md / pdf / docx 文档，系统会自动切块并向量化'
+          }}
+        </p>
+      </div>
 
-      <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
+      <el-alert
+        v-if="errorMsg"
+        :title="errorMsg"
+        type="error"
+        show-icon
+        :closable="false"
+        class="panel-error"
+      />
 
       <template v-if="activeKb">
         <el-upload
@@ -416,7 +416,7 @@ onBeforeUnmount(stopPolling)
       </template>
 
       <p v-else class="main-empty">从左侧选择或新建一个知识库来管理文档。</p>
-    </main>
+    </div>
 
     <!-- 新建 / 重命名 -->
     <el-dialog
@@ -468,13 +468,18 @@ onBeforeUnmount(stopPolling)
         </el-button>
       </template>
     </el-dialog>
-  </div>
+  </section>
 </template>
 
 <style scoped>
-.kb-layout {
+.panel {
   display: flex;
-  height: 100vh;
+  align-items: stretch;
+  gap: 20px;
+  padding: 18px 20px;
+  border: 1px solid #e5e5e5;
+  border-radius: 10px;
+  background: #fff;
   font-family: -apple-system, "Segoe UI", "Microsoft YaHei", Arial, sans-serif;
 }
 
@@ -483,11 +488,9 @@ onBeforeUnmount(stopPolling)
   display: flex;
   flex-direction: column;
   flex-shrink: 0;
-  width: 260px;
-  padding: 16px 12px 12px;
-  border-right: 1px solid #e5e5e5;
-  background: #f7f8fa;
-  box-sizing: border-box;
+  width: 230px;
+  padding-right: 20px;
+  border-right: 1px solid #eee;
 }
 
 .side-head {
@@ -501,27 +504,15 @@ onBeforeUnmount(stopPolling)
   flex: 1;
   margin: 0;
   color: #333;
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
 }
 
 .search-input {
-  width: 100%;
   margin-bottom: 10px;
-  padding: 6px 10px;
-  border: 1px solid #d0d0d0;
-  border-radius: 6px;
-  font-size: 13px;
-  box-sizing: border-box;
-}
-
-.search-input:focus {
-  outline: none;
-  border-color: #1a7f37;
 }
 
 .side-empty {
-  flex: 1;
   margin-top: 24px;
   text-align: center;
   color: #aaa;
@@ -530,6 +521,7 @@ onBeforeUnmount(stopPolling)
 
 .kb-list {
   flex: 1;
+  max-height: calc(100vh - 320px);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -544,7 +536,7 @@ onBeforeUnmount(stopPolling)
 }
 
 .kb-row:hover {
-  background: #eceef1;
+  background: #f2f4f7;
 }
 
 .kb-row.active {
@@ -615,48 +607,32 @@ onBeforeUnmount(stopPolling)
   opacity: 0.2;
 }
 
-.side-footer {
-  flex-shrink: 0;
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid #e5e5e5;
-}
-
 /* ---------- 右侧文档区 ---------- */
 .kb-main {
   flex: 1;
-  display: flex;
-  flex-direction: column;
   min-width: 0;
-  padding: 18px 24px;
-  background: #fafafa;
-  box-sizing: border-box;
-  overflow-y: auto;
 }
 
 .main-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
   margin-bottom: 14px;
 }
 
-.main-head h1 {
-  margin: 0 0 4px;
+.panel-title {
+  margin: 0 0 6px;
   color: #333;
-  font-size: 20px;
+  font-size: 15px;
+  font-weight: 600;
 }
 
-.subtitle {
+.panel-desc {
   margin: 0;
   color: #888;
   font-size: 13px;
+  line-height: 1.6;
 }
 
-.error {
-  margin: 0 0 10px;
-  color: #d33;
-  font-size: 13px;
+.panel-error {
+  margin-bottom: 12px;
 }
 
 .uploader {
@@ -704,7 +680,7 @@ onBeforeUnmount(stopPolling)
 }
 
 .main-empty {
-  margin-top: 80px;
+  margin-top: 60px;
   text-align: center;
   color: #aaa;
   font-size: 14px;

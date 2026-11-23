@@ -87,11 +87,6 @@ function onKbChange(ids: number[]) {
   storeKbIds(ids)
 }
 
-function goKb() {
-  userMenuOpen.value = false
-  void router.push({ name: 'kb' })
-}
-
 /** 参考资料正文较长，列表中先截断展示。 */
 function excerpt(text: string, max = 160): string {
   const flat = text.replace(/\s+/g, ' ').trim()
@@ -566,7 +561,8 @@ function onKeydown(e: KeyboardEvent) {
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
       <footer class="chat-input-bar">
-        <div class="kb-bar">
+        <!-- 知识库仅管理员可管理，普通用户按 user_id 查不到任何库，不必看到选择条 -->
+        <div v-if="adminUser" class="kb-bar">
           <span class="kb-bar-label">知识库</span>
           <el-select
             v-model="kbIds"
@@ -588,7 +584,6 @@ function onKeydown(e: KeyboardEvent) {
               <p class="kb-option-empty">还没有知识库</p>
             </template>
           </el-select>
-          <el-button link type="primary" size="small" @click="goKb">管理</el-button>
         </div>
 
         <div class="input-row">

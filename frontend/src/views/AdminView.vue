@@ -1,15 +1,17 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
+import KnowledgeBaseManagement from '@/components/KnowledgeBaseManagement.vue'
 import UserManagement from '@/components/UserManagement.vue'
 import TokenStatistics from '@/components/TokenStatistics.vue'
 import { clearAuth, getUsername } from '@/api/auth'
 
 const router = useRouter()
+const route = useRoute()
 const username = ref(getUsername() ?? '')
 
-type MenuKey = 'dashboard' | 'token_stats' | 'settings' | 'users'
+type MenuKey = 'token_stats' | 'kb' | 'settings' | 'users'
 
 interface MenuNode {
   key: MenuKey
@@ -20,17 +22,26 @@ interface MenuNode {
 
 /** 后台功能菜单；新增菜单只需往树里追加一项，并补对应的内容分支。 */
 const menus: MenuNode[] = [
-  {
-    key: 'dashboard',
-    label: '数据统计',
-    children: [{ key: 'token_stats', label: 'Token 用量' }],
-  },
+  { key: 'token_stats', label: '首页' },
+  { key: 'kb', label: '知识库' },
   { key: 'settings', label: '系统设置', children: [{ key: 'users', label: '用户管理' }] },
 ]
 
-const activeKey = ref<MenuKey>('token_stats')
-// 默认展开「数据统计」分组
-const defaultOpeneds = ['dashboard']
+/** 菜单树里的全部 key，用于校验 ?menu= 参数。 */
+const menuKeys: MenuKey[] = menus.flatMap((menu) => [
+  menu.key,
+  ...(menu.children?.map((child) => child.key) ?? []),
+])
+
+/** 支持 /admin?menu=kb 直接定位某一项。 */
+function initialKey(): MenuKey {
+  const query = route.query.menu
+  return typeof query === 'string' && (menuKeys as string[]).includes(query)
+    ? (query as MenuKey)
+    : 'token_stats'
+}
+
+const activeKey = ref<MenuKey>(initialKey())
 
 function findMenu(key: MenuKey): MenuNode | undefined {
   for (const menu of menus) {
@@ -65,7 +76,6 @@ function logout() {
 
       <el-menu
         :default-active="activeKey"
-        :default-openeds="defaultOpeneds"
         class="side-menu"
         @select="selectMenu"
       >
@@ -80,6 +90,7 @@ function logout() {
             </el-menu-item>
           </el-sub-menu>
           <el-menu-item v-else :index="menu.key">
+            <el-icon><Setting /></el-icon>
             <span>{{ menu.label }}</span>
           </el-menu-item>
         </template>
@@ -107,6 +118,7 @@ function logout() {
 
       <UserManagement v-else-if="activeKey === 'users'" />
       <TokenStatistics v-else-if="activeKey === 'token_stats'" />
+      <KnowledgeBaseManagement v-else-if="activeKey === 'kb'" />
     </div>
   </div>
 </template>
