@@ -16,6 +16,54 @@ def init_db() -> None:
     _ensure_vector_extension()  # 必须先于 create_all：kb_chunks 的列类型依赖 vector
     Base.metadata.create_all(engine)
     _ensure_kb_vector_index()
+    _ensure_llm_calls_task_id()
+    _ensure_agent_task_m1_columns()
+
+
+def _ensure_llm_calls_task_id() -> None:
+    """存量库补齐 llm_calls.task_id（create_all 不会 ALTER 已有表）。"""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE llm_calls "
+                "ADD COLUMN IF NOT EXISTS task_id VARCHAR(36)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_llm_calls_task_id "
+                "ON llm_calls (task_id)"
+            )
+        )
+
+
+def _ensure_agent_task_m1_columns() -> None:
+    """存量库补齐 agent_tasks 的 M1/M2 列。"""
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "ALTER TABLE agent_tasks "
+                "ADD COLUMN IF NOT EXISTS retry_count INTEGER DEFAULT 0"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE agent_tasks "
+                "ADD COLUMN IF NOT EXISTS replan_count INTEGER DEFAULT 0"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE agent_tasks "
+                "ADD COLUMN IF NOT EXISTS pending_approval_json TEXT"
+            )
+        )
+        conn.execute(
+            text(
+                "ALTER TABLE agent_tasks "
+                "ADD COLUMN IF NOT EXISTS checkpoint_json TEXT"
+            )
+        )
 
 
 def _ensure_vector_extension() -> None:

@@ -179,13 +179,14 @@ def log_llm_call(
     conversation_id: str | None,
     user_id: int | None,
     model: str,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     answer: str | None,
     input_tokens: int,
     output_tokens: int,
     total_tokens: int,
     latency_ms: int | None = None,
     success: bool = True,
+    task_id: str | None = None,
 ) -> None:
     """记录一次模型调用的输入(messages)、输出与 token 用量。
 
@@ -196,6 +197,7 @@ def log_llm_call(
             LLMCall(
                 conversation_id=conversation_id,
                 user_id=user_id,
+                task_id=task_id,
                 model=model,
                 input=json.dumps(messages, ensure_ascii=False),
                 output=answer,

@@ -35,3 +35,31 @@ export function fetchTokenStatistics(period: PeriodType = 'day', date: string = 
   if (date) params.append('date', date)
   return requestJson<StatisticsResponse>(`/api/admin/statistics/token?${params.toString()}`)
 }
+
+/** Agent 任务统计汇总 */
+export interface AgentStatisticsResponse {
+  period: string
+  start: string
+  end: string
+  task_count: number
+  succeeded: number
+  failed: number
+  cancelled: number
+  running_or_pending: number
+  total_steps: number
+  total_tool_calls: number
+  total_tokens: number
+  total_replans: number
+  avg_steps: number
+  avg_tokens: number
+  success_rate: number
+}
+
+export function fetchAgentStatistics(
+  period: PeriodType = 'day',
+  date: string = '',
+): Promise<AgentStatisticsResponse> {
+  const params = new URLSearchParams({ period })
+  if (date) params.append('date', date)
+  return requestJson<AgentStatisticsResponse>(`/api/admin/statistics/agent?${params.toString()}`)
+}

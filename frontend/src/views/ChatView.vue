@@ -1,10 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { CopyDocument, SortUp, SortDown } from '@element-plus/icons-vue'
 
 import { clearAuth, fetchMe, getUsername, isAdmin } from '@/api/auth'
+import {
+  cancelAgentTask,
+  createAgentTask,
+  resolveAgentApproval,
+  subscribeAgentEvents,
+  type AgentMode,
+} from '@/api/agent'
 import {
   deleteConversation,
   fetchConversationMessages,
@@ -33,8 +40,13 @@ const listRef = ref<HTMLElement | null>(null)
 // 用户入口弹框显隐，交由 el-popover 的 v-model:visible 管理
 const userMenuOpen = ref(false)
 
-// AbortController 用于中断流式请求
+// AbortController 用于中断流式请求 / 事件订阅
 const abortController = ref<AbortController | null>(null)
+// 当前 Agent 任务（停止时需调用取消接口）
+const activeTaskId = ref<string | null>(null)
+// auto=后端分流；agent=强制任务；chat=强制普通问答
+const chatMode = ref<AgentMode>('auto')
+const agentTrace = ref<string[]>([])
 
 // 左侧会话列表
 const conversations = ref<ConversationSummary[]>([])
@@ -104,11 +116,49 @@ function resetConversation() {
   sessionStorage.removeItem(CONVERSATION_KEY)
 }
 
-// 停止生成
+/** 高风险工具人工审批弹窗 */
+async function promptApproval(taskId: string, data: Record<string, unknown>) {
+  if (!taskId) return
+  const tool = String(data.tool || '')
+  const risk = String(data.risk || '')
+  const argsText = JSON.stringify(data.args ?? {}, null, 2)
+  try {
+    await ElMessageBox.confirm(
+      `工具：${tool}\n风险：${risk}\n参数：\n${argsText}`,
+      '需要人工审批',
+      {
+        distinguishCancelAndClose: true,
+        confirmButtonText: '批准执行',
+        cancelButtonText: '拒绝',
+        type: 'warning',
+        customClass: 'agent-approval-box',
+      },
+    )
+    await resolveAgentApproval(taskId, { action: 'approve' })
+    ElMessage.success('已批准，任务继续执行')
+  } catch (action) {
+    if (action === 'cancel') {
+      try {
+        await resolveAgentApproval(taskId, { action: 'reject', reason: '用户拒绝' })
+        ElMessage.info('已拒绝该工具调用')
+      } catch (err) {
+        errorMsg.value = errText(err)
+      }
+    }
+    // close / 其它：不自动拒绝，用户可稍后处理或取消任务
+  }
+}
+
+// 停止生成：断开订阅，并请求取消进行中的 Agent 任务
 function stopGeneration() {
+  const taskId = activeTaskId.value
   if (abortController.value) {
     abortController.value.abort()
     abortController.value = null
+  }
+  if (taskId) {
+    void cancelAgentTask(taskId).catch(() => undefined)
+    activeTaskId.value = null
   }
   loading.value = false
 }
@@ -295,43 +345,110 @@ async function submit() {
   if (!question || loading.value) return
 
   errorMsg.value = ''
+  agentTrace.value = []
   messages.value.push({ role: 'user', content: question })
   input.value = ''
   loading.value = true
 
-  // 创建 AbortController
   abortController.value = new AbortController()
+  activeTaskId.value = null
 
   await scrollToBottom()
 
-  // 先插入一条空的助手消息，流式增量逐块填充进去
   const replyIndex = messages.value.length
   messages.value.push({ role: 'assistant', content: '' })
 
   try {
-    // 除当前问题与占位回复外的历史一并发给后端，让模型拥有上下文
-    const history = messages.value.slice(0, -2)
-    await streamChat(question, history, {
-      conversationId: conversationId.value,
-      kbIds: kbIds.value,
-      signal: abortController.value.signal,
-      onMeta: (meta) => {
-        if (meta.conversationId) {
-          conversationId.value = meta.conversationId
-          sessionStorage.setItem(CONVERSATION_KEY, meta.conversationId)
-        }
-        // 首帧带回落库前的参考资料，直接挂到本轮回复上
-        if (meta.sources && meta.sources.length) {
+    const created = await createAgentTask({
+      message: question,
+      conversation_id: conversationId.value,
+      kb_ids: kbIds.value,
+      mode: chatMode.value,
+    })
+
+    conversationId.value = created.conversation_id
+    sessionStorage.setItem(CONVERSATION_KEY, created.conversation_id)
+
+    if (created.mode === 'chat' || !created.task_id) {
+      const history = messages.value.slice(0, -2)
+      await streamChat(question, history, {
+        conversationId: conversationId.value,
+        kbIds: kbIds.value,
+        signal: abortController.value.signal,
+        onMeta: (meta) => {
+          if (meta.conversationId) {
+            conversationId.value = meta.conversationId
+            sessionStorage.setItem(CONVERSATION_KEY, meta.conversationId)
+          }
+          if (meta.sources && meta.sources.length) {
+            const reply = messages.value[replyIndex]
+            if (reply) reply.sources = meta.sources
+          }
+        },
+        onDelta: (delta) => {
           const reply = messages.value[replyIndex]
-          if (reply) reply.sources = meta.sources
+          if (reply) reply.content += delta
+          void scrollToBottom()
+        },
+        onDone: (data) => {
+          const reply = messages.value[replyIndex]
+          if (reply) {
+            if (data.messageId) reply.id = data.messageId
+            if (data.inputTokens !== undefined) reply.input_tokens = data.inputTokens
+            if (data.outputTokens !== undefined) reply.output_tokens = data.outputTokens
+            if (data.totalTokens !== undefined) reply.total_tokens = data.totalTokens
+          }
+        },
+      })
+      return
+    }
+
+    activeTaskId.value = created.task_id
+    await subscribeAgentEvents(created.task_id, {
+      signal: abortController.value.signal,
+      onEvent: (type, data) => {
+        if (type === 'plan.updated') {
+          const plan = data.plan
+          if (Array.isArray(plan)) {
+            const prefix = data.revised ? '重规划' : '计划'
+            const reason = typeof data.reason === 'string' && data.reason ? `（${data.reason}）` : ''
+            agentTrace.value.push(
+              `${prefix}${reason}：` +
+                plan.map((s: { title?: string }) => s.title || '').filter(Boolean).join(' → '),
+            )
+          }
+        } else if (type === 'task.resumed') {
+          agentTrace.value.push(
+            data.reason === 'approval_resolved'
+              ? '审批已处理，继续执行'
+              : `任务恢复重试（第 ${String(data.retry_count || '')} 次）`,
+          )
+        } else if (type === 'approval.required') {
+          agentTrace.value.push(
+            `等待审批：${String(data.tool || '')}（风险 ${String(data.risk || '')}）`,
+          )
+          void promptApproval(String(activeTaskId.value || ''), data)
+        } else if (type === 'approval.resolved') {
+          agentTrace.value.push(
+            `审批结果：${String(data.action || '')} → ${String(data.tool || '')}`,
+          )
+        } else if (type === 'step.started') {
+          agentTrace.value.push(`开始：${String(data.title || data.step_id || '')}`)
+        } else if (type === 'tool.started') {
+          agentTrace.value.push(`调用工具：${String(data.tool || '')}`)
+        } else if (type === 'tool.finished') {
+          agentTrace.value.push(
+            `工具完成：${String(data.tool || '')}${data.ok === false ? '（失败）' : ''} — ${String(data.summary || '')}`,
+          )
         }
+        void scrollToBottom()
       },
       onDelta: (delta) => {
         const reply = messages.value[replyIndex]
         if (reply) reply.content += delta
         void scrollToBottom()
       },
-      onDone: (data) => {
+      onCompleted: (data) => {
         const reply = messages.value[replyIndex]
         if (reply) {
           if (data.messageId) reply.id = data.messageId
@@ -340,16 +457,17 @@ async function submit() {
           if (data.totalTokens !== undefined) reply.total_tokens = data.totalTokens
         }
       },
+      onFailed: (error) => {
+        errorMsg.value = error
+      },
     })
   } catch (err) {
-    // 用户主动取消不显示错误
     if (err instanceof DOMException && err.name === 'AbortError') {
       // 保留已生成的内容
     } else {
       errorMsg.value = errText(err)
       const reply = messages.value[replyIndex]
       if (reply && !reply.content) {
-        // 尚未收到任何内容，移除空占位并把问题还给输入框
         messages.value.splice(replyIndex, 1)
         input.value = question
       }
@@ -357,8 +475,8 @@ async function submit() {
   } finally {
     loading.value = false
     abortController.value = null
+    activeTaskId.value = null
     await scrollToBottom()
-    // 本轮问答已落库，刷新列表以出现新会话或更新标题时间
     if (conversationId.value) {
       void loadConversations()
     }
@@ -506,6 +624,12 @@ function onKeydown(e: KeyboardEvent) {
           :class="msg.role"
         >
           <div class="bubble" :class="{ thinking: msg.role === 'assistant' && !msg.content && loading && index === messages.length - 1 }">
+            <ul
+              v-if="msg.role === 'assistant' && index === messages.length - 1 && agentTrace.length"
+              class="agent-trace"
+            >
+              <li v-for="(line, ti) in agentTrace" :key="ti">{{ line }}</li>
+            </ul>
             <template v-if="msg.role === 'assistant' && msg.content">
               <MarkdownRenderer :content="msg.content" />
               <div v-if="!loading || index !== messages.length - 1" class="message-actions">
@@ -533,7 +657,7 @@ function onKeydown(e: KeyboardEvent) {
                 </span>
               </div>
             </template>
-            <template v-else>
+            <template v-else-if="msg.role !== 'assistant' || !agentTrace.length">
               {{ msg.content || (loading && index === messages.length - 1 ? '思考中…' : '') }}
             </template>
 
@@ -561,29 +685,37 @@ function onKeydown(e: KeyboardEvent) {
       <p v-if="errorMsg" class="error">{{ errorMsg }}</p>
 
       <footer class="chat-input-bar">
-        <!-- 知识库仅管理员可管理，普通用户按 user_id 查不到任何库，不必看到选择条 -->
-        <div v-if="adminUser" class="kb-bar">
-          <span class="kb-bar-label">知识库</span>
-          <el-select
-            v-model="kbIds"
-            class="kb-select"
-            size="small"
-            multiple
-            clearable
-            collapse-tags
-            collapse-tags-tooltip
-            :multiple-limit="MAX_KB_PER_CHAT"
-            placeholder="不引用（仅模型自身知识作答）"
-            @change="onKbChange"
-          >
-            <el-option v-for="kb in kbs" :key="kb.id" :label="kb.name" :value="kb.id">
-              <span class="kb-option-name">{{ kb.name }}</span>
-              <span class="kb-option-count">{{ kb.doc_count }} 文档</span>
-            </el-option>
-            <template v-if="kbs.length === 0" #empty>
-              <p class="kb-option-empty">还没有知识库</p>
-            </template>
+        <div class="kb-bar">
+          <span class="kb-bar-label">模式</span>
+          <el-select v-model="chatMode" class="mode-select" size="small">
+            <el-option label="自动" value="auto" />
+            <el-option label="智能任务" value="agent" />
+            <el-option label="普通问答" value="chat" />
           </el-select>
+          <!-- 知识库仅管理员可管理，普通用户按 user_id 查不到任何库，不必看到选择条 -->
+          <template v-if="adminUser">
+            <span class="kb-bar-label">知识库</span>
+            <el-select
+              v-model="kbIds"
+              class="kb-select"
+              size="small"
+              multiple
+              clearable
+              collapse-tags
+              collapse-tags-tooltip
+              :multiple-limit="MAX_KB_PER_CHAT"
+              placeholder="不引用（仅模型自身知识作答）"
+              @change="onKbChange"
+            >
+              <el-option v-for="kb in kbs" :key="kb.id" :label="kb.name" :value="kb.id">
+                <span class="kb-option-name">{{ kb.name }}</span>
+                <span class="kb-option-count">{{ kb.doc_count }} 文档</span>
+              </el-option>
+              <template v-if="kbs.length === 0" #empty>
+                <p class="kb-option-empty">还没有知识库</p>
+              </template>
+            </el-select>
+          </template>
         </div>
 
         <div class="input-row">
@@ -974,8 +1106,27 @@ function onKeydown(e: KeyboardEvent) {
   font-size: 12px;
 }
 
+.mode-select {
+  width: 120px;
+}
+
 .kb-select {
   width: 300px;
+}
+
+.agent-trace {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  list-style: none;
+  border-radius: 8px;
+  background: #f5f7fa;
+  color: #606266;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.agent-trace li + li {
+  margin-top: 4px;
 }
 
 .kb-option-name {

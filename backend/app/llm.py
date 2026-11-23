@@ -9,7 +9,13 @@ import time
 from collections.abc import Iterator
 from dataclasses import dataclass
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
+from langchain_core.messages import (
+    AIMessage,
+    BaseMessage,
+    HumanMessage,
+    SystemMessage,
+    ToolMessage,
+)
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 from openai import OpenAI
 
@@ -41,6 +47,26 @@ class ChatResult:
     model: str
     usage: TokenUsage
     latency_ms: int
+
+
+@dataclass
+class ToolCallRequest:
+    """模型发起的一次工具调用。"""
+
+    id: str
+    name: str
+    args: dict
+
+
+@dataclass
+class ToolChatResult:
+    """带工具调用的一轮模型输出。"""
+
+    answer: str
+    model: str
+    usage: TokenUsage
+    latency_ms: int
+    tool_calls: list[ToolCallRequest]
 
 
 def is_configured() -> bool:
@@ -127,6 +153,98 @@ def _mock_answer(messages: list[dict[str, str]]) -> str:
         "【mock 回答】后端尚未配置大模型 Key，这是一条占位回复。\n"
         f"你的问题：{last_user}\n"
         "请在 backend/.env 中设置 LLM_API_KEY 后重启服务以获取真实回答。"
+    )
+
+
+def _to_lc_messages_with_tools(messages: list[dict]) -> list[BaseMessage]:
+    """支持 role=tool 与 assistant.tool_calls 的消息转换。"""
+    lc: list[BaseMessage] = []
+    for m in messages:
+        role = m.get("role", "user")
+        content = m.get("content") or ""
+        if role == "tool":
+            lc.append(
+                ToolMessage(
+                    content=content if isinstance(content, str) else str(content),
+                    tool_call_id=str(m.get("tool_call_id") or ""),
+                    name=m.get("name"),
+                )
+            )
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            lc.append(
+                AIMessage(
+                    content=content if isinstance(content, str) else str(content),
+                    tool_calls=m["tool_calls"],
+                )
+            )
+            continue
+        cls = _ROLE_MAP.get(role, HumanMessage)
+        lc.append(cls(content=content if isinstance(content, str) else str(content)))
+    return lc
+
+
+def chat_with_tools(
+    messages: list[dict],
+    tools: list[dict],
+) -> ToolChatResult:
+    """一轮带 tools 的模型调用；返回文本与/或 tool_calls。
+
+    tools 为 OpenAI function 描述列表（type=function）。
+    mock 模式下不发起真实工具调用，直接给占位最终回答。
+    """
+    if not is_configured():
+        answer = _mock_answer(
+            [{"role": m.get("role", "user"), "content": str(m.get("content") or "")} for m in messages]
+        )
+        return ToolChatResult(
+            answer=answer,
+            model="mock",
+            usage=_estimate_usage(
+                [{"role": "user", "content": str(m.get("content") or "")} for m in messages],
+                answer,
+            ),
+            latency_ms=0,
+            tool_calls=[],
+        )
+
+    llm = _build_llm(streaming=False)
+    if tools:
+        llm = llm.bind_tools(tools)
+    start = time.perf_counter()
+    try:
+        resp = llm.invoke(_to_lc_messages_with_tools(messages))
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"调用大模型失败：{exc}") from exc
+    latency_ms = int((time.perf_counter() - start) * 1000)
+
+    model = (resp.response_metadata or {}).get("model_name") or get_model_name()
+    raw_calls = getattr(resp, "tool_calls", None) or []
+    tool_calls: list[ToolCallRequest] = []
+    for c in raw_calls:
+        if isinstance(c, dict):
+            tool_calls.append(
+                ToolCallRequest(
+                    id=str(c.get("id") or ""),
+                    name=str(c.get("name") or ""),
+                    args=dict(c.get("args") or {}),
+                )
+            )
+        else:
+            tool_calls.append(
+                ToolCallRequest(
+                    id=str(getattr(c, "id", "") or ""),
+                    name=str(getattr(c, "name", "") or ""),
+                    args=dict(getattr(c, "args", None) or {}),
+                )
+            )
+
+    return ToolChatResult(
+        answer=_content_to_text(resp.content),
+        model=model,
+        usage=_usage_from_metadata(getattr(resp, "usage_metadata", None)),
+        latency_ms=latency_ms,
+        tool_calls=tool_calls,
     )
 
 

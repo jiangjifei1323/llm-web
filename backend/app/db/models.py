@@ -79,6 +79,8 @@ class LLMCall(Base):
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    # Agent 任务可选关联，便于按任务聚合成本；普通问答为 NULL
+    task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     model: Mapped[str] = mapped_column(String(64))
     # 发送给模型的完整消息序列（system + 历史 + 当前问题），以 JSON 字符串存储
     input: Mapped[str] = mapped_column(Text)
@@ -90,6 +92,100 @@ class LLMCall(Base):
     success: Mapped[bool] = mapped_column(Boolean, default=True)
     # 统计接口全部按 created_at 过滤/分组，必须有索引
     created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now, index=True)
+
+
+class AgentTask(Base):
+    """Agent 任务：与会话关联的一次多步执行。"""
+
+    __tablename__ = "agent_tasks"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        ForeignKey("conversations.id", ondelete="CASCADE"), index=True
+    )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    input: Mapped[str] = mapped_column(Text)
+    # created / running / awaiting_approval / succeeded / failed / cancelled
+    status: Mapped[str] = mapped_column(String(32), default="created", index=True)
+    # auto 路由后的实际模式：agent（chat 模式不建任务）
+    mode: Mapped[str] = mapped_column(String(16), default="agent")
+    # 请求携带的知识库 id 列表（JSON 数组）
+    kb_ids_json: Mapped[str] = mapped_column(Text, default="[]")
+    plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    used_steps: Mapped[int] = mapped_column(Integer, default=0)
+    used_llm_calls: Mapped[int] = mapped_column(Integer, default=0)
+    used_tool_calls: Mapped[int] = mapped_column(Integer, default=0)
+    used_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTimeSec, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_message_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
+    # 进程重启后的自动重试次数
+    retry_count: Mapped[int] = mapped_column(Integer, default=0)
+    # 执行中重规划次数
+    replan_count: Mapped[int] = mapped_column(Integer, default=0)
+    # M2：人工审批挂起信息 / 断点续跑检查点（JSON）
+    pending_approval_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    checkpoint_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
+
+
+class AgentStep(Base):
+    """任务内的一个可见步骤（规划步或执行摘要）。"""
+
+    __tablename__ = "agent_steps"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), index=True
+    )
+    step_key: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(200))
+    # pending / running / succeeded / failed / skipped
+    status: Mapped[str] = mapped_column(String(32), default="pending")
+    input_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    output_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTimeSec, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTimeSec, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
+
+
+class AgentEvent(Base):
+    """任务事件流：只追加，id 作为 SSE 游标。"""
+
+    __tablename__ = "agent_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), index=True
+    )
+    # 任务内序号，从 1 递增
+    seq: Mapped[int] = mapped_column(Integer)
+    type: Mapped[str] = mapped_column(String(64), index=True)
+    payload: Mapped[str] = mapped_column(Text, default="{}")
+    created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
+
+
+class AgentToolCall(Base):
+    """单次工具调用审计。"""
+
+    __tablename__ = "agent_tool_calls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    task_id: Mapped[str] = mapped_column(
+        ForeignKey("agent_tasks.id", ondelete="CASCADE"), index=True
+    )
+    step_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(64))
+    args_json: Mapped[str] = mapped_column(Text, default="{}")
+    observation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ok: Mapped[bool] = mapped_column(Boolean, default=True)
+    risk: Mapped[str] = mapped_column(String(16), default="read")
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTimeSec, default=_now)
 
 
 class KnowledgeBase(Base):

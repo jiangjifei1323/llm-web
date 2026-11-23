@@ -151,3 +151,57 @@ def token_statistics(
         data=data,
         summary=summary,
     )
+
+
+class AgentStatisticsResponse(BaseModel):
+    """Agent 任务统计汇总。"""
+
+    period: str
+    start: str
+    end: str
+    task_count: int
+    succeeded: int
+    failed: int
+    cancelled: int
+    running_or_pending: int
+    total_steps: int
+    total_tool_calls: int
+    total_tokens: int
+    total_replans: int
+    avg_steps: float
+    avg_tokens: float
+    success_rate: float
+
+
+@router.get("/agent", response_model=AgentStatisticsResponse)
+def agent_statistics(
+    period: PeriodType = Query(default="day", description="统计周期：day/week/month"),
+    date: str = Query(default="", description="基准日期 YYYY-MM-DD，默认今天"),
+    _: User = Depends(auth.require_admin),
+) -> AgentStatisticsResponse:
+    """Agent 任务数、成功率、平均步数与 Token 汇总。"""
+    if date:
+        try:
+            base_date = datetime.strptime(date, "%Y-%m-%d").date()
+        except ValueError:
+            raise HTTPException(status_code=400, detail="日期格式错误，应为 YYYY-MM-DD")
+    else:
+        base_date = datetime.now().date()
+
+    if period == "day":
+        start_dt = datetime.combine(base_date, datetime.min.time())
+        end_dt = start_dt + timedelta(days=1)
+    elif period == "week":
+        start_dt = datetime.combine(base_date - timedelta(days=6), datetime.min.time())
+        end_dt = datetime.combine(base_date + timedelta(days=1), datetime.min.time())
+    else:
+        start_dt = datetime.combine(base_date - timedelta(days=29), datetime.min.time())
+        end_dt = datetime.combine(base_date + timedelta(days=1), datetime.min.time())
+
+    stats = db.agent_statistics_summary(start_dt, end_dt)
+    return AgentStatisticsResponse(
+        period=period,
+        start=start_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        end=end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        **stats,
+    )

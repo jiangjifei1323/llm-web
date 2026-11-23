@@ -3,11 +3,18 @@ import { computed, onMounted, ref } from 'vue'
 import * as echarts from 'echarts'
 import { ElMessage } from 'element-plus'
 
-import { fetchTokenStatistics, type PeriodType, type StatisticsResponse } from '@/api/statistics'
+import {
+  fetchAgentStatistics,
+  fetchTokenStatistics,
+  type AgentStatisticsResponse,
+  type PeriodType,
+  type StatisticsResponse,
+} from '@/api/statistics'
 
 const loading = ref(false)
 const period = ref<PeriodType>('day')
 const chartData = ref<StatisticsResponse | null>(null)
+const agentStats = ref<AgentStatisticsResponse | null>(null)
 
 let chartInstance: echarts.ECharts | null = null
 
@@ -20,10 +27,19 @@ function formatNumber(num: number): string {
   return num.toString()
 }
 
+function formatRate(rate: number): string {
+  return `${(rate * 100).toFixed(1)}%`
+}
+
 async function loadData() {
   loading.value = true
   try {
-    chartData.value = await fetchTokenStatistics(period.value)
+    const [token, agent] = await Promise.all([
+      fetchTokenStatistics(period.value),
+      fetchAgentStatistics(period.value).catch(() => null),
+    ])
+    chartData.value = token
+    agentStats.value = agent
     updateChart()
   } catch (err) {
     ElMessage.error('加载统计数据失败')
@@ -158,6 +174,41 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- Agent 任务统计 -->
+    <div v-if="agentStats" class="agent-section">
+      <h3 class="section-title">Agent 任务</h3>
+      <div class="summary-cards agent-cards">
+        <div class="card">
+          <div class="card-label">任务数</div>
+          <div class="card-value">{{ agentStats.task_count }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">成功率</div>
+          <div class="card-value total">{{ formatRate(agentStats.success_rate) }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">平均步数</div>
+          <div class="card-value input">{{ agentStats.avg_steps }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">平均 Token</div>
+          <div class="card-value output">{{ formatNumber(agentStats.avg_tokens) }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">工具调用</div>
+          <div class="card-value calls">{{ agentStats.total_tool_calls }}</div>
+        </div>
+        <div class="card">
+          <div class="card-label">重规划次数</div>
+          <div class="card-value">{{ agentStats.total_replans }}</div>
+        </div>
+      </div>
+      <p class="agent-breakdown">
+        成功 {{ agentStats.succeeded }} · 失败 {{ agentStats.failed }} · 取消
+        {{ agentStats.cancelled }} · 进行中 {{ agentStats.running_or_pending }}
+      </p>
+    </div>
+
     <!-- 图表 -->
     <div v-loading="loading" class="chart-container">
       <div id="token-chart" class="chart"></div>
@@ -238,5 +289,26 @@ onUnmounted(() => {
 .chart {
   width: 100%;
   height: 400px;
+}
+
+.agent-section {
+  margin-bottom: 20px;
+}
+
+.section-title {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+  color: #303133;
+}
+
+.agent-cards {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+.agent-breakdown {
+  margin: 8px 0 0;
+  color: #909399;
+  font-size: 13px;
 }
 </style>

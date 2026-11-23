@@ -9,8 +9,10 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from . import auth, db
+from .agent import start_runner, stop_runner
 from .api import (
     admin_router,
+    agent_router,
     auth_router,
     chat_router,
     conversations_router,
@@ -29,7 +31,11 @@ async def lifespan(_: FastAPI):
     auth.ensure_secret_configured()  # 生产环境用弱/默认密钥时直接拒绝启动
     db.init_db()
     auth.seed_admin()  # 确保管理员账户 admin/admin 存在
-    yield
+    start_runner()
+    try:
+        yield
+    finally:
+        stop_runner()
 
 
 app = FastAPI(title="llm-web 问答助手", version="0.1.0", lifespan=lifespan)
@@ -45,6 +51,7 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(agent_router)
 app.include_router(conversations_router)
 app.include_router(feedback_router)
 app.include_router(kb_router)
